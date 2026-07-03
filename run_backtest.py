@@ -191,10 +191,15 @@ def plot_equity_curves(results_map: dict, output_dir: str, times_arr: np.ndarray
 def main():
     OUTPUT_DIR  = "backtest_output"
     single_mode = "--single" in sys.argv
+    offline_mode = "--offline" in sys.argv
 
     # ── 1. 获取真实点差 ──────────────────────────────────────────────
-    print("\n获取实时点差...")
-    cost_rates = get_live_spreads()
+    if offline_mode:
+        print("\n[离线模式] 使用默认点差，不连接 MT5")
+        cost_rates = dict(DEFAULT_COST_RATES)
+    else:
+        print("\n获取实时点差...")
+        cost_rates = get_live_spreads()
     for sym, c in cost_rates.items():
         print(f"  {sym:12s}: cost_rate={c:.6f}")
 
@@ -227,8 +232,8 @@ def main():
     print(f"{'='*62}\n")
 
     # ── 3. 加载数据 ───────────────────────────────────────────────────
-    print("正在连接 MT5 并拉取数据...")
-    with MT5DataFetcher() as fetcher:
+    print(f"正在加载数据{'（离线缓存）' if offline_mode else '（连接 MT5）'}...")
+    with MT5DataFetcher(offline=offline_mode) as fetcher:
         mgr = MT5DataManager(fetcher)
         mgr.load()
         raw_dict  = mgr.raw_dict

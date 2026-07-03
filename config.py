@@ -96,8 +96,9 @@ class Config:
     BATCH_SIZE      = 128          # 参见 ModelConfig.BATCH_SIZE
     TRAIN_STEPS     = 300          # 参见 ModelConfig.TRAIN_STEPS
     MAX_FORMULA_LEN = 8            # 参见 ModelConfig.MAX_FORMULA_LEN
+    # DEVICE 同样以 model_core/config.py 为准（已改为 cpu，原因见该文件注释）
     DEVICE          = (
-        torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.device("cpu")
         if _TORCH_AVAILABLE
         else "cpu"
     )
