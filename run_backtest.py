@@ -331,13 +331,20 @@ def main():
         plot_equity_curves(results_map, OUTPUT_DIR, times_np)
 
     # ── 7. K 线 + 交易图 ─────────────────────────────────────────────
-    print("生成 K 线图（最近 120 根）...")
-    chart = BacktestChart(max_bars=120)
-    chart.plot_all(backtest_results, output_dir=OUTPUT_DIR)
-    for r in backtest_results:
-        saved = chart.plot_all_trade_zooms(r, output_dir=OUTPUT_DIR,
-                                           pre_bars=25, post_bars=12, max_trades=8)
-        print(f"  {r.symbol}: {len(saved)} 张缩放图")
+    # 用 try-except 保护，避免个别品种 NaN 导致整个回测崩溃
+    try:
+        print("生成 K 线图（最近 120 根）...")
+        chart = BacktestChart(max_bars=120)
+        chart.plot_all(backtest_results, output_dir=OUTPUT_DIR)
+        for r in backtest_results:
+            try:
+                saved = chart.plot_all_trade_zooms(r, output_dir=OUTPUT_DIR,
+                                                   pre_bars=25, post_bars=12, max_trades=8)
+                print(f"  {r.symbol}: {len(saved)} 张缩放图")
+            except Exception as e:
+                print(f"  {r.symbol}: 缩放图生成失败（{e}），跳过")
+    except Exception as e:
+        print(f"[警告] K 线图生成失败（{e}），跳过画图，不影响回测结果")
 
     # ── 8. 保存 JSON 报告 ─────────────────────────────────────────────
     report = {
