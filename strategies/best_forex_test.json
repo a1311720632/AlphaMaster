@@ -1,0 +1,15 @@
+{
+  "vocab_version": "v71336c7c7b25",
+  "symbol": "forex_test",
+  "formula": [
+    2,
+    25,
+    10,
+    74,
+    48,
+    60,
+    32,
+    35
+  ],
+  "best_score": 0.1641298532485962
+}
