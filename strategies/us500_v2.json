@@ -1,0 +1,99 @@
+{
+  "name": "us500_v2",
+  "version": "2026-07-09",
+  "vocab_version": "v9217a2c0d91a",
+  "status": "verified",
+  "symbol": "US500.cash (SP500)",
+  "mode": "single",
+  "train_mode": "ftmo + OOS_gate",
+  "formula_tokens": [
+    56,
+    102,
+    42,
+    119,
+    91,
+    118,
+    63,
+    126
+  ],
+  "formula_readable": "SAR_DIST -> DECAY_LINEAR_5 -> KYLE_LAMBDA -> SQRT -> WMA -> SIGNED_LOG -> CS_RANK_RET5 -> IF_GT",
+  "formula_operators": [
+    "SAR_DIST",
+    "DECAY_LINEAR_5",
+    "KYLE_LAMBDA",
+    "SQRT",
+    "WMA",
+    "SIGNED_LOG",
+    "CS_RANK_RET5",
+    "IF_GT"
+  ],
+  "train_best_score": 1.196629285812378,
+  "train_step": 2520,
+  "train_restarts": 18,
+  "backtest": {
+    "annual_return": "+16.3%",
+    "sharpe": 1.16,
+    "ic": "+0.011",
+    "max_drawdown": "-49%",
+    "win_rate": "52.2%",
+    "turnover": "173 trades/year",
+    "position_bias": "66% long / 31% short",
+    "data": "5.3 years, 32,973 H1 bars",
+    "note": "OOS泛化门控版。vs旧版(无门控)：Sharpe从1.85降到1.16但WF从3/4变成4/4全正，5/5年全盈利。代价是降低了收益率，换来了更高的一致性。",
+    "walk_forward": {
+      "fold1": {
+        "oos": "+0.30",
+        "sharpe": 1.78
+      },
+      "fold2": {
+        "oos": "+0.10",
+        "sharpe": 1.37
+      },
+      "fold3": {
+        "oos": "+0.13",
+        "sharpe": 0.98
+      },
+      "fold4": {
+        "oos": "+0.12",
+        "sharpe": 1.37
+      },
+      "total_oos": "+0.66",
+      "verdict": "PASS — ALL 4 folds profitable (4/4)"
+    },
+    "yearly": {
+      "year1": {
+        "pnl": "+0.21",
+        "sharpe": 0.95
+      },
+      "year2": {
+        "pnl": "+0.26",
+        "sharpe": 1.67
+      },
+      "year3": {
+        "pnl": "+0.12",
+        "sharpe": 1.49
+      },
+      "year4": {
+        "pnl": "+0.12",
+        "sharpe": 1.41
+      },
+      "year5": {
+        "pnl": "+0.12",
+        "sharpe": 1.0
+      }
+    },
+    "v1_comparison": {
+      "v1_sharpe": 1.85,
+      "v1_wf": "3/4",
+      "v1_yearly": "4/5",
+      "v2_sharpe": 1.16,
+      "v2_wf": "4/4",
+      "v2_yearly": "5/5",
+      "summary": "v2牺牲峰值收益换取全线一致性，OOS门控排除了过拟合虚高"
+    }
+  },
+  "logic": {
+    "summary": "SAR反转+流动性冲击+条件选择",
+    "detail": "SAR_DIST(抛物线SAR距离)经DECAY_LINEAR_5衰减，KYLE_LAMBDA(价格冲击)经SQRT压缩+WMA平滑，SIGNED_LOG做符号保持，CS_RANK_RET5截面排名，IF_GT实现条件分支"
+  }
+}

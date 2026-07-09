@@ -1,18 +1,15 @@
 {
   "vocab_version": "v9217a2c0d91a",
   "symbol": "US2000.cash",
-  "mode": "single",
   "formula": [
     24,
-    114,
-    74,
-    91,
-    22,
-    114,
-    67,
-    123
+    76,
+    24,
+    57,
+    72,
+    71,
+    105,
+    71
   ],
-  "formula_decoded": "OBV_SLOPE -> TS_SUM_20 -> DECAY -> WMA -> BOLL_WIDTH -> TS_SUM_20 -> MUL -> CLIP",
-  "best_score": 1.2308598756790161,
-  "train_steps": 5000
+  "best_score": 1.130878210067749
 }
