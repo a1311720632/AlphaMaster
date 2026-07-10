@@ -32,13 +32,19 @@ except ImportError:
 
 try:
     from config import Config
-    _CACHE_DIR = Path(getattr(Config, "KLINE_CACHE_DIR", r"D:\K线数据"))
     _TIMEFRAME = Config.TIMEFRAME
     _BARS_COUNT = Config.BARS_COUNT
 except ImportError:
-    _CACHE_DIR = Path(r"D:\K线数据")
     _TIMEFRAME = 16385   # H1
     _BARS_COUNT = 12000
+
+
+def _default_cache_dir() -> Path:
+    try:
+        from config import Config
+        return Path(getattr(Config, "KLINE_CACHE_DIR", r"D:\K线数据"))
+    except ImportError:
+        return Path(r"D:\K线数据")
 
 _COLUMNS = ["time", "open", "high", "low", "close", "tick_volume"]
 
@@ -48,11 +54,11 @@ class KlineCache:
 
     def __init__(
         self,
-        cache_dir:  str | Path = _CACHE_DIR,
+        cache_dir:  str | Path | None = None,
         timeframe:  int         = _TIMEFRAME,
         bars_count: int         = _BARS_COUNT,
     ) -> None:
-        self.cache_dir  = Path(cache_dir)
+        self.cache_dir  = Path(cache_dir) if cache_dir is not None else _default_cache_dir()
         self.timeframe  = timeframe
         self.bars_count = bars_count
         self.cache_dir.mkdir(parents=True, exist_ok=True)

@@ -119,7 +119,7 @@ class Config:
     BARS_COUNT            = 10_000_000
     MIN_BARS              = 3000   # 低于此值的品种被排除
     DATA_REFRESH_INTERVAL = 300    # 秒，实盘数据刷新间隔
-    KLINE_CACHE_DIR       = r"D:\K线数据"  # 本地 K 线缓存目录
+    KLINE_CACHE_DIR       = os.getenv("KLINE_CACHE_DIR", r"D:\K线数据")  # 本地 K 线缓存目录
 
     # ── 模型参数（仅供参考，训练实际使用 model_core.config.ModelConfig）────
     # 训练参数的权威来源是 model_core/config.py，这里的值不生效

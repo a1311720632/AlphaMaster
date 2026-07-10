@@ -82,6 +82,7 @@ verification_results.json
 
 # ── 实盘/运行态文件 ────────────────────────────────────────────────
 portfolio_state.json
+web_settings.json
 STOP_SIGNAL
 train.pid
 train_stdout.log

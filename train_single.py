@@ -31,7 +31,8 @@ def train_single(fetcher, symbol: str, offline: bool):
     print(f"{'='*60}")
     print(f"  奖励模式: {ModelConfig.REWARD_MODE}")
     print(f"  训练步数: {ModelConfig.TRAIN_STEPS}")
-    print(f"  offline={offline}")
+    print(f"  K线目录: {Config.KLINE_CACHE_DIR}")
+    print(f"  离线模式: 是（仅读本地缓存）")
     print(f"{'='*60}")
 
     # 加载全部品种数据，然后切出单品种视图
@@ -106,16 +107,35 @@ def _save_strategy(engine, symbol):
 
 # ── CLI ────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    offline = "--offline" in sys.argv
-    syms = [s for s in sys.argv[1:] if not s.startswith("--")]
-    mode  = "ftmo"
+    offline = True
+    mode = "ftmo"
+    syms: list[str] = []
+    skip_next = False
+    for arg in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--mode":
+            skip_next = True
+            continue
+        if arg == "--cache-dir":
+            skip_next = True
+            continue
+        if arg.startswith("--"):
+            continue
+        syms.append(arg)
+
     if "--mode" in sys.argv:
         idx = sys.argv.index("--mode")
         mode = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else "ftmo"
+    if "--cache-dir" in sys.argv:
+        idx = sys.argv.index("--cache-dir")
+        if idx + 1 < len(sys.argv):
+            Config.KLINE_CACHE_DIR = sys.argv[idx + 1]
     ModelConfig.REWARD_MODE = mode
 
     if not syms:
-        print("用法: python train_single.py <SYMBOL> [--offline] [--mode ftmo|forex|standard]")
+        print("用法: python train_single.py <SYMBOL> [--cache-dir PATH] [--mode ftmo]")
         print(f"可选品种: {Config.TRAINABLE_SYMBOLS}")
         sys.exit(1)
 

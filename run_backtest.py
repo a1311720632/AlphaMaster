@@ -65,7 +65,7 @@ def decode_formula(tokens: list[int]) -> str:
 def load_strategy(path: Path) -> dict | None:
     if not path.exists():
         return None
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, list):
         return {"formula": data, "vocab_version": "legacy", "symbol": None}
@@ -193,6 +193,14 @@ def main():
     single_mode = "--single" in sys.argv
     offline_mode = "--offline" in sys.argv
 
+    strategy_file = None
+    data_file_arg = None
+    for i, arg in enumerate(sys.argv):
+        if arg == "--strategy-file" and i + 1 < len(sys.argv):
+            strategy_file = sys.argv[i + 1]
+        elif arg == "--data-file" and i + 1 < len(sys.argv):
+            data_file_arg = sys.argv[i + 1]
+
     # ── 1. 获取真实点差 ──────────────────────────────────────────────
     if offline_mode:
         print("\n[离线模式] 使用默认点差，不连接 MT5")
@@ -203,9 +211,29 @@ def main():
     for sym, c in cost_rates.items():
         print(f"  {sym:12s}: cost_rate={c:.6f}")
 
-    # ── 2. 加载各品种策略 ─────────────────────────────────────────────
+    # ── 2. 加载策略 ─────────────────────────────────────────────────
+    symbols_to_load: list[str] | None = None
     print(f"\n{'='*62}")
-    if single_mode:
+    if strategy_file:
+        data = load_strategy(Path(strategy_file))
+        if data is None:
+            print(f"[ERROR] 找不到: {strategy_file}"); sys.exit(1)
+        sym = data.get("symbol")
+        if not sym:
+            stem = Path(strategy_file).stem
+            if stem.startswith("best_"):
+                sym = stem.replace("best_", "", 1)
+            elif stem.startswith("strategy_"):
+                sym = stem.replace("strategy_", "", 1)
+        if not sym:
+            print("[ERROR] 策略文件未包含 symbol，且无法从文件名识别"); sys.exit(1)
+        symbol_formulas = {sym: data["formula"]}
+        symbols_to_load = [sym]
+        sc = data.get("best_score", "N/A")
+        score_txt = f"{sc:.3f}" if isinstance(sc, (int, float)) else str(sc)
+        print(f"  模式: 单策略文件 ({Path(strategy_file).name})")
+        print(f"  {sym}: score={score_txt}  {decode_formula(data['formula'])}")
+    elif single_mode:
         data = load_strategy(Path(Config.STRATEGY_FILE))
         if data is None:
             print(f"[ERROR] 找不到: {Config.STRATEGY_FILE}"); sys.exit(1)
@@ -232,61 +260,71 @@ def main():
     print(f"{'='*62}\n")
 
     # ── 3. 加载数据 ───────────────────────────────────────────────────
-    print(f"正在加载数据{'（离线缓存）' if offline_mode else '（连接 MT5）'}...")
-    with MT5DataFetcher(offline=offline_mode) as fetcher:
-        mgr = MT5DataManager(fetcher)
-        mgr.load()
-        raw_dict  = mgr.raw_dict
-        syms      = mgr.symbols
-        T         = raw_dict["open"].shape[1]
-        times_all = raw_dict.get("time", None)
-        print(f"  品种: {syms}  T={T} bars\n")
+    if data_file_arg:
+        from data_pipeline.parquet_manager import ParquetDataManager
 
-        # ── 4. 为每品种计算因子 + 回测 ───────────────────────────────
-        vm   = StackVM()
-        # 因果特征化：_robust_norm 现为滚动窗口实现，传入全量序列是安全的
-        # 每个时间步 t 的归一化参数只依赖 [t-w+1..t]，无 look-ahead
-        feat = MT5FeatureEngineer.compute_features(raw_dict)  # [N, F, T]，因果安全
+        print(f"正在加载数据（Parquet: {Path(data_file_arg).name}）...")
+        pm = ParquetDataManager(data_file_arg)
+        pm.load()
+        raw_dict = pm.raw_dict
+        syms = pm.symbols
+    else:
+        print(f"正在加载数据{'（离线缓存）' if offline_mode else '（连接 MT5）'}...")
+        with MT5DataFetcher(offline=offline_mode) as fetcher:
+            mgr = MT5DataManager(fetcher)
+            mgr.load(symbols=symbols_to_load)
+            raw_dict = mgr.raw_dict
+            syms = mgr.symbols
 
-        results_map = {}
-        backtest_results = []
+    T = raw_dict["open"].shape[1]
+    times_all = raw_dict.get("time", None)
+    print(f"  品种: {syms}  T={T} bars\n")
 
-        for i, sym in enumerate(syms):
-            if sym not in symbol_formulas:
-                print(f"  [跳过] {sym}（无策略）")
-                continue
+    # ── 4. 为每品种计算因子 + 回测 ───────────────────────────────
+    vm   = StackVM()
+    # 因果特征化：_robust_norm 现为滚动窗口实现，传入全量序列是安全的
+    # 每个时间步 t 的归一化参数只依赖 [t-w+1..t]，无 look-ahead
+    feat = MT5FeatureEngineer.compute_features(raw_dict)  # [N, F, T]，因果安全
 
-            formula   = symbol_formulas[sym]
-            cost_rate = cost_rates.get(sym, 0.0001)
-            feat_i    = feat[i:i+1]
-            raw_i     = {k: v[i:i+1] for k, v in raw_dict.items()}
+    results_map = {}
+    backtest_results = []
 
-            # 用真实点差运行 BacktestEngine
-            engine    = BacktestEngine(formula=formula, cost_rate=cost_rate)
-            sym_res   = engine.run(raw_i, feat_i, [sym])
-            backtest_results.extend(sym_res)
+    for i, sym in enumerate(syms):
+        if sym not in symbol_formulas:
+            print(f"  [跳过] {sym}（无策略）")
+            continue
 
-            r = sym_res[0]
-            pnl_arr = r.pnl
-            cum_arr = r.cum_pnl
-            sharpe  = calc_sharpe(pnl_arr)
-            sortino = calc_sortino(pnl_arr)
-            mdd     = calc_max_drawdown(cum_arr)
-            calmar  = calc_calmar(cum_arr)
+        formula   = symbol_formulas[sym]
+        cost_rate = cost_rates.get(sym, 0.0001)
+        feat_i    = feat[i:i+1]
+        raw_i     = {k: v[i:i+1] for k, v in raw_dict.items()}
 
-            results_map[sym] = {
-                "pnl":          pnl_arr,
-                "cum_pnl":      cum_arr,
-                "total_return": r.total_return,
-                "sharpe":       sharpe,
-                "sortino":      sortino,
-                "max_drawdown": mdd,
-                "calmar":       calmar,
-                "n_trades":     r.n_trades,
-                "win_rate":     r.win_rate,
-                "avg_hold":     r.avg_hold_bars,
-                "cost_rate":    cost_rate,
-            }
+        # 用真实点差运行 BacktestEngine
+        engine    = BacktestEngine(formula=formula, cost_rate=cost_rate)
+        sym_res   = engine.run(raw_i, feat_i, [sym])
+        backtest_results.extend(sym_res)
+
+        r = sym_res[0]
+        pnl_arr = r.pnl
+        cum_arr = r.cum_pnl
+        sharpe  = calc_sharpe(pnl_arr)
+        sortino = calc_sortino(pnl_arr)
+        mdd     = calc_max_drawdown(cum_arr)
+        calmar  = calc_calmar(cum_arr)
+
+        results_map[sym] = {
+            "pnl":          pnl_arr,
+            "cum_pnl":      cum_arr,
+            "total_return": r.total_return,
+            "sharpe":       sharpe,
+            "sortino":      sortino,
+            "max_drawdown": mdd,
+            "calmar":       calmar,
+            "n_trades":     r.n_trades,
+            "win_rate":     r.win_rate,
+            "avg_hold":     r.avg_hold_bars,
+            "cost_rate":    cost_rate,
+        }
 
     # ── 5. 打印各品种统计 ─────────────────────────────────────────────
     print(f"\n{'='*62}")

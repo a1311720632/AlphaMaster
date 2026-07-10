@@ -170,13 +170,13 @@ class StackVM:
         if global_std < 1e-6:
             return x   # 常数因子，由 engine 的 const_cnt 拦截
 
-        # ── 截面标准化（跨品种，每时间步）────────────────────────────
-        cs_mean = x.mean(dim=0, keepdim=True)
-        cs_std  = x.std(dim=0, keepdim=True).clamp(min=1e-8)
-        cs_z    = (x - cs_mean) / cs_std
-
-        if cs_z.std() >= 0.3:
-            return torch.clamp(cs_z, -3.0, 3.0)
+        # ── 截面标准化（跨品种，每时间步；N=1 时跳过）──────────────
+        if N > 1:
+            cs_mean = x.mean(dim=0, keepdim=True)
+            cs_std  = x.std(dim=0, keepdim=True).clamp(min=1e-8)
+            cs_z    = (x - cs_mean) / cs_std
+            if cs_z.std() >= 0.3:
+                return torch.clamp(cs_z, -3.0, 3.0)
 
         # ── 时序标准化（每品种独立）─────────────────────────────────
         ts_mean = x.mean(dim=1, keepdim=True)

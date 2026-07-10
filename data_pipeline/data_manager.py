@@ -43,8 +43,8 @@ class MT5DataManager:
     # 公开方法
     # ──────────────────────────────────────────────────────────────────────
 
-    def load(self) -> None:
-        """加载 Config.SYMBOLS 中所有品种的 OHLCV 数据到内存。
+    def load(self, symbols: list[str] | None = None) -> None:
+        """加载指定品种（默认 Config.SYMBOLS）的 OHLCV 数据到内存。
 
         - 遍历 Config.SYMBOLS，调用 fetcher.fetch() 获取每个品种数据。
         - 排除 bars < Config.MIN_BARS 的品种并记录 WARNING。
@@ -54,13 +54,14 @@ class MT5DataManager:
         Raises:
             ValueError: 所有品种均不满足 MIN_BARS 要求时抛出。
         """
+        symbol_list = list(symbols) if symbols is not None else list(Config.SYMBOLS)
         logger.info(
-            f"Loading data for {len(Config.SYMBOLS)} symbols: {Config.SYMBOLS}"
+            f"Loading data for {len(symbol_list)} symbols: {symbol_list}"
         )
 
         # ── 步骤 1：拉取原始数据 ────────────────────────────────────────
         raw_dfs: dict[str, pd.DataFrame] = {}
-        for symbol in Config.SYMBOLS:
+        for symbol in symbol_list:
             df = self._fetcher.fetch(symbol, Config.TIMEFRAME, Config.BARS_COUNT)
             if len(df) < Config.MIN_BARS:
                 logger.warning(

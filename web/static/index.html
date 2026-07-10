@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AlphaMaster · 量化因子挖掘中心</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css?v=6" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <!-- 背景动效层 -->
+  <div class="bg-layers" aria-hidden="true">
+    <div class="bg-aurora"></div>
+    <canvas id="glyphCanvas" class="bg-canvas"></canvas>
+    <canvas id="neuralCanvas" class="bg-canvas"></canvas>
+    <div class="bg-grid"></div>
+    <div class="bg-scan"></div>
+    <div class="bg-vignette"></div>
+  </div>
+
+  <div class="app">
+    <header class="header">
+      <div class="brand">
+        <div class="brand-mark" data-text="α">α<span class="brand-ring"></span></div>
+        <div>
+          <h1>AlphaMaster</h1>
+          <p>基于深度神经网络强化学习的量化因子挖掘中心</p>
+        </div>
+      </div>
+      <div class="header-meta" id="headerMeta">
+        <label class="debug-toggle-label">
+          <input type="checkbox" id="debugModeCheck" />
+          <span>调试模式</span>
+        </label>
+        <span class="pill" id="jobPill"><i class="pill-dot"></i>空闲</span>
+        <span class="meta-item" id="deviceMeta">—</span>
+      </div>
+    </header>
+
+    <!-- 步骤导航 -->
+    <nav class="stepper" id="stepper">
+      <button type="button" class="step active" data-page="train">
+        <span class="step-index">01</span>
+        <span class="step-body">
+          <span class="step-title">模型训练</span>
+          <span class="step-sub">因子挖掘 · 强化学习</span>
+        </span>
+      </button>
+      <span class="step-link"></span>
+      <button type="button" class="step" data-page="backtest">
+        <span class="step-index">02</span>
+        <span class="step-body">
+          <span class="step-title">策略回测</span>
+          <span class="step-sub">资金曲线 · 绩效评估</span>
+        </span>
+      </button>
+    </nav>
+
+    <!-- ══════════════ 步骤一：训练页 ══════════════ -->
+    <div class="page active" id="page-train">
+    <section class="panel launch-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <h2>启动训练</h2>
+      <div class="launch-form launch-form-file">
+        <div class="launch-row">
+          <button type="button" class="btn btn-secondary" id="browseBtn">选择数据文件</button>
+          <div class="data-file-card" id="dataFileCard">
+            <div class="data-file-empty">尚未选择</div>
+          </div>
+          <div class="launch-actions">
+            <button class="btn btn-primary" id="startBtn" disabled>开始训练</button>
+            <button class="btn btn-danger" id="stopBtn" disabled>停止</button>
+            <button class="btn btn-secondary" id="exportBtn" disabled title="下载当前品种的最优策略 JSON">导出策略</button>
+            <button class="btn btn-secondary" id="exportTrainingBtn" disabled title="打包 checkpoint、训练曲线与策略为 zip">导出训练</button>
+            <button class="btn btn-secondary" id="importTrainingBtn" disabled title="上传 .zip 或 .pt，下次训练断点续训">导入训练</button>
+            <input type="file" id="importTrainingFile" accept=".zip,.pt" hidden />
+          </div>
+        </div>
+        <small class="field-hint">Parquet 命名：<code>{品种}_{周期}.parquet</code>，如 <code>XAUUSD_H1.parquet</code></small>
+      </div>
+    </section>
+
+    <div class="split">
+      <section class="panel chart-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <div class="panel-head">
+          <h2 id="chartTitle">训练曲线</h2>
+          <span class="hint" id="chartHint">选择文件并开始训练后显示</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="mainChart"></canvas>
+        </div>
+        <details class="chart-metrics-help" open>
+          <summary>指标说明</summary>
+          <ul class="metrics-list">
+            <li>
+              <span class="metric-swatch" style="--swatch: #5eead4"></span>
+              <div>
+                <strong>最优分数</strong>
+                <p>到目前为止找到的最好因子公式得分，越高表示回测表现越好，曲线阶梯上升说明发现了更优公式。</p>
+              </div>
+            </li>
+            <li>
+              <span class="metric-swatch" style="--swatch: #818cf8"></span>
+              <div>
+                <strong>验证分数</strong>
+                <p>当前这一步在验证集上的平均得分，反映近期一批公式的整体质量，会有起伏属正常。</p>
+              </div>
+            </li>
+            <li>
+              <span class="metric-swatch" style="--swatch: #fbbf24"></span>
+              <div>
+                <strong>策略熵</strong>
+                <p>模型生成公式时的探索随机程度。偏高说明还在广泛尝试，逐渐走低说明策略趋于固定。</p>
+              </div>
+            </li>
+          </ul>
+        </details>
+        <div class="formula-box" id="formulaBox">
+          <span class="formula-label">最优公式</span>
+          <code id="formulaText">—</code>
+        </div>
+      </section>
+
+      <section class="panel log-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <div class="panel-head">
+          <h2>训练日志</h2>
+          <span class="hint" id="logHint">—</span>
+        </div>
+        <pre class="log-view" id="logView">等待任务…</pre>
+      </section>
+    </div>
+
+    <section class="panel strategies-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <h2>已保存策略</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>品种</th>
+              <th>周期</th>
+              <th>分数</th>
+              <th>公式</th>
+            </tr>
+          </thead>
+          <tbody id="strategiesBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel debug-panel" id="debugPanelSection">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head">
+        <h2>调试 / 报错输出</h2>
+        <span class="hint" id="debugLogPaths">—</span>
+      </div>
+      <pre class="debug-view" id="debugView">暂无报错</pre>
+    </section>
+    </div><!-- /page-train -->
+
+    <!-- ══════════════ 步骤二：回测页 ══════════════ -->
+    <div class="page" id="page-backtest">
+      <section class="panel launch-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <h2>启动回测</h2>
+        <div class="launch-form launch-form-file">
+          <div class="launch-row">
+            <button type="button" class="btn btn-secondary" id="btBrowseStrategyBtn">选择策略</button>
+            <div class="data-file-card" id="btStrategyCard">
+              <div class="data-file-empty">尚未选择策略文件</div>
+            </div>
+            <div class="launch-actions">
+              <button class="btn btn-primary" id="btStartBtn" disabled>开始回测</button>
+              <button class="btn btn-danger" id="btStopBtn" disabled>停止</button>
+            </div>
+          </div>
+          <small class="field-hint">默认使用训练页对应品种的 <code>strategies/best_{品种}.json</code>；也可选择「导出策略」下载的 JSON 文件。</small>
+        </div>
+      </section>
+
+      <!-- 回测绩效概览 -->
+      <section class="panel bt-summary-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <div class="panel-head">
+          <h2>回测绩效</h2>
+          <span class="hint" id="btPortfolioHint">尚未运行回测</span>
+        </div>
+        <div class="metric-grid" id="btPortfolioGrid">
+          <div class="metric-empty">运行回测后显示收益、夏普、回撤等指标</div>
+        </div>
+      </section>
+
+      <div class="split">
+        <!-- 品种绩效表 -->
+        <section class="panel bt-table-panel">
+          <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+          <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+          <div class="panel-head">
+            <h2>绩效明细</h2>
+            <span class="hint" id="btTableHint">—</span>
+          </div>
+          <div class="table-wrap">
+            <table class="bt-table">
+              <thead>
+                <tr>
+                  <th>品种</th>
+                  <th>收益</th>
+                  <th>Sharpe</th>
+                  <th>Sortino</th>
+                  <th>最大回撤</th>
+                  <th>Calmar</th>
+                  <th>交易数</th>
+                  <th>胜率</th>
+                </tr>
+              </thead>
+              <tbody id="btTableBody">
+                <tr class="empty-row"><td colspan="8">暂无回测结果</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 回测日志 -->
+        <section class="panel log-panel">
+          <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+          <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+          <div class="panel-head">
+            <h2>回测日志</h2>
+            <span class="hint" id="btLogHint">—</span>
+          </div>
+          <div class="bt-phase" id="btPhaseBar">
+            <div class="bt-phase-track"><div class="bt-phase-fill" id="btPhaseFill"></div></div>
+            <span class="bt-phase-label" id="btPhaseLabel">待机</span>
+          </div>
+          <pre class="log-view" id="btLogView">等待任务…</pre>
+        </section>
+      </div>
+
+      <!-- 资金曲线图库 -->
+      <section class="panel bt-charts-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <div class="panel-head">
+          <h2>资金曲线</h2>
+          <span class="hint" id="btChartsHint">回测完成后展示选中品种的资金曲线与交易图</span>
+        </div>
+        <div class="chart-gallery" id="btChartGallery">
+          <div class="metric-empty">暂无图表</div>
+        </div>
+      </section>
+    </div><!-- /page-backtest -->
+  </div>
+
+  <!-- 图片灯箱 -->
+  <div class="lightbox" id="lightbox">
+    <img id="lightboxImg" src="" alt="资金曲线" />
+  </div>
+
+  <script src="/static/bg.js?v=1"></script>
+  <script src="/static/app.js?v=19"></script>
+</body>
+</html>

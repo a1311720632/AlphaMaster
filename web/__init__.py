@@ -1,0 +1,1 @@
+"""AlphaMaster training web UI."""

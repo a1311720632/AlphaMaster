@@ -17,7 +17,7 @@ model_core/vocab.py -- Formula_Vocabulary 集成与确定性版本（R3）
   - `VOCAB_SCHEMA_TAG`：人类可读的 schema 标签，仅供日志展示，不参与兼容判定。
 
 import 方向说明：`features.py` / `ops.py` 只依赖 `.registry`，本模块从二者读取
-注册表视图不构成循环依赖。下游 `factors.py` / `vm.py` / `config.py` /
+注册表视图不构成循环依赖。下游 `vm.py` / `config.py` /
 `alphagpt.py` / `engine.py` 对 `FEATURE_NAMES` / `FORMULA_VOCAB` / `VOCAB_VERSION`
 的 import 保持兼容。
 """

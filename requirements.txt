@@ -24,6 +24,10 @@ python-dotenv>=1.0.0  # Load .env files
 loguru>=0.7.0         # Structured logging
 tqdm>=4.66.0          # Progress bars
 
+# Training Web UI
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+
 # ===== Optional Dependencies (For experimental scripts) =====
 # See requirements-optional.txt for:
 #   - matplotlib, seaborn (for lord/experiment.py visualization)

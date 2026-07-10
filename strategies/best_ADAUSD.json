@@ -1,0 +1,16 @@
+{
+  "vocab_version": "v9217a2c0d91a",
+  "symbol": "ADAUSD",
+  "formula": [
+    31,
+    56,
+    81,
+    59,
+    60,
+    61,
+    72,
+    126
+  ],
+  "best_score": 1.9533847570419312,
+  "formula_decoded": "TREND_STRENGTH_50 → SAR_DIST → TS_STD_10 → HURST_50 → FRACTAL_DIM_30 → AC2 → GATE → IF_GT"
+}
