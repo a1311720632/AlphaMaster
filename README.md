@@ -1,4 +1,4 @@
-# AlphaGPT
+# AlphaMaster
 
 ![](showcase.png)
 
@@ -7,6 +7,13 @@
 [时隔数月后，项目作者再次受到了人身安全威胁。](https://github.com/imbue-bit/fuck_all_tian)
 
 也许金融真的是一个意外死亡率很高的行业🤔
+
+---
+
+## License
+
+This project is licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE).
+Derivative works and network deployments must provide corresponding source code under the same license.
 
 ---
 

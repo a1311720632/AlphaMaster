@@ -1,5 +1,7 @@
 AlphaGPT MT5 仓库速读
 
+**开源协议**：GNU Affero General Public License v3.0 (AGPL-3.0)。修改、分发或通过网络提供服务时，须按相同协议公开源代码。详见根目录 `LICENSE`。
+
 这是一套面向 MetaTrader 5 的「因子挖掘 + 回测 + 实盘执行」量化系统。核心思路是：用 Transformer 自动生成可解释的因子公式，通过回测打分筛选，再把高分公式用于 MT5 实时信号与下单。
 
 代码组织（按功能划分）
