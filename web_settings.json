@@ -1,0 +1,15 @@
+{
+  "last_data_file": "D:\\K线数据\\ADAUSD_H1.parquet",
+  "last_strategy_file": "D:\\cl\\AlphaMaster\\strategies\\best_ADAUSD.json",
+  "debug_mode": false,
+  "ai_provider": "deepseek",
+  "ai_api_key": "",
+  "bt_commission_pct": 0.02,
+  "bt_slippage_pct": 0.01,
+  "realtime_watches": [],
+  "feishu_enabled": false,
+  "feishu_webhook_url": "",
+  "feishu_secret": "",
+  "tqsdk_user": "18128531144",
+  "tqsdk_password": "qq123456123"
+}
