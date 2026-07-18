@@ -2089,8 +2089,32 @@ function onRtSourceChange() {
     if (src.timeframes && src.timeframes.includes(cur)) tfSel.value = cur;
     else if (src.timeframes && src.timeframes.includes("1h")) tfSel.value = "1h";
   }
-  if (presets) {
-    presets.innerHTML = (src.presets || []).map((s) => `<option value="${escHtml(s)}"></option>`).join("");
+  // 品种输入/下拉切换：presets 较多时（如国内期货 60 个品种）用下拉框
+  const symbolInput = $("rtSymbolInput");
+  const symbolSelect = $("rtSymbolSelect");
+  const useSelect = src.id === "domestic_futures" || (src.presets && src.presets.length > 20);
+  if (symbolInput && symbolSelect) {
+    if (useSelect) {
+      symbolInput.hidden = true;
+      symbolSelect.hidden = false;
+      symbolSelect.innerHTML = (src.presets || [])
+        .map((s) => `<option value="${escHtml(s)}">${escHtml(s)}</option>`)
+        .join("");
+      symbolSelect.onchange = () => { symbolInput.value = symbolSelect.value; };
+      if (symbolSelect.value) symbolInput.value = symbolSelect.value;
+    } else {
+      symbolInput.hidden = false;
+      symbolSelect.hidden = true;
+      if (presets) {
+        presets.innerHTML = (src.presets || [])
+          .map((s) => `<option value="${escHtml(s)}"></option>`)
+          .join("");
+      }
+    }
+  } else if (presets) {
+    presets.innerHTML = (src.presets || [])
+      .map((s) => `<option value="${escHtml(s)}"></option>`)
+      .join("");
   }
   if (hint) {
     hint.textContent = `${src.label}：${src.hint || ""}`;
@@ -2112,6 +2136,8 @@ function rtApplySymbolFromStrategy(sym) {
   if (!s) return;
   const input = $("rtSymbolInput");
   if (input) input.value = s;
+  const select = $("rtSymbolSelect");
+  if (select && !select.hidden) select.value = s;
 }
 
 function onRtStrategyChange() {

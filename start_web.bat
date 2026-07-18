@@ -6,6 +6,9 @@ REM Prefer: python -m pip ... (avoids pip-shim GBK issues on Chinese Windows)
 set HOST=127.0.0.1
 set PORT=8765
 
+REM Use system Python 3.13 (has all deps installed)
+set PYTHON=C:\Program Files\Python313\python.exe
+
 echo ============================================================
 echo   AlphaMaster Web Console
 echo   http://%HOST%:%PORT%
@@ -20,7 +23,7 @@ for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":%PORT% " ^| findstr LISTENI
 timeout /t 1 /nobreak >nul
 
 echo [2/3] Starting uvicorn ...
-start "AlphaMaster Server" python run_web.py --host %HOST% --port %PORT%
+start "AlphaMaster Server" "%PYTHON%" run_web.py --host %HOST% --port %PORT%
 
 echo [3/3] Warming up APIs (torch/fastapi first import can take ~6s) ...
 set /a TRIES=0
@@ -28,7 +31,7 @@ set /a TRIES=0
 set /a TRIES+=1
 if %TRIES% GTR 90 goto ready_fail
 timeout /t 1 /nobreak >nul
-python -c "import urllib.request; urllib.request.urlopen('http://%HOST%:%PORT%/api/overview', timeout=2).read(); urllib.request.urlopen('http://%HOST%:%PORT%/api/ai/providers', timeout=2).read(); urllib.request.urlopen('http://%HOST%:%PORT%/api/strategies', timeout=2).read()" 2>nul
+"%PYTHON%" -c "import urllib.request; urllib.request.urlopen('http://%HOST%:%PORT%/api/overview', timeout=2).read(); urllib.request.urlopen('http://%HOST%:%PORT%/api/ai/providers', timeout=2).read(); urllib.request.urlopen('http://%HOST%:%PORT%/api/strategies', timeout=2).read()" 2>nul
 if errorlevel 1 goto wait_ready
 
 echo.

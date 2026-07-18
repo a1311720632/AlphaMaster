@@ -9,5 +9,7 @@
   "realtime_watches": [],
   "feishu_enabled": false,
   "feishu_webhook_url": "",
-  "feishu_secret": ""
+  "feishu_secret": "",
+  "tqsdk_user": "",
+  "tqsdk_password": ""
 }

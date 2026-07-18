@@ -9,6 +9,7 @@ from web.data_sources.base import DataSource
 SOURCE_KINDS: tuple[tuple[str, str], ...] = (
     ("mt5", "MT5"),
     ("tradingview", "TradingView"),
+    ("domestic_futures", "国内期货"),
 )
 
 _INSTANCES: dict[str, DataSource] = {}
@@ -28,6 +29,9 @@ def _build(kind: str) -> DataSource:
     if kind == "tongdaxin":
         from web.data_sources.tongdaxin_source import TongdaxinSource
         return TongdaxinSource()
+    if kind == "domestic_futures":
+        from web.data_sources.domestic_futures_source import DomesticFuturesSource
+        return DomesticFuturesSource()
     raise ValueError(f"未知数据源: {kind}")
 
 
