@@ -23,6 +23,9 @@ _DEFAULT = {
     "feishu_enabled": False,
     "feishu_webhook_url": "",
     "feishu_secret": "",
+    # tqsdk 天勤量化账号（国内期货实时数据源）
+    "tqsdk_user": "",
+    "tqsdk_password": "",
 }
 
 
@@ -140,6 +143,8 @@ def load_settings() -> dict:
     out["feishu_enabled"] = bool(out.get("feishu_enabled", False))
     out["feishu_webhook_url"] = str(out.get("feishu_webhook_url") or "").strip()
     out["feishu_secret"] = str(out.get("feishu_secret") or "").strip()
+    out["tqsdk_user"] = str(out.get("tqsdk_user") or "").strip()
+    out["tqsdk_password"] = str(out.get("tqsdk_password") or "").strip()
     recovered = _recover_last_data_file(out)
     if recovered != out.get("last_data_file") and _is_production_settings_path():
         out["last_data_file"] = recovered
@@ -212,6 +217,10 @@ def save_settings(data: dict) -> dict:
         current["feishu_webhook_url"] = str(data["feishu_webhook_url"] or "").strip()
     if "feishu_secret" in data:
         current["feishu_secret"] = str(data["feishu_secret"] or "").strip()
+    if "tqsdk_user" in data:
+        current["tqsdk_user"] = str(data["tqsdk_user"] or "").strip()
+    if "tqsdk_password" in data:
+        current["tqsdk_password"] = str(data["tqsdk_password"] or "").strip()
     SETTINGS_PATH.write_text(
         json.dumps(current, indent=2, ensure_ascii=False),
         encoding="utf-8",
