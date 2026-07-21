@@ -134,9 +134,15 @@ class Config:
         else "cpu"
     )
 
-    # ── 风控参数 ──────────────────────────────────────────
+    # ── 风控参数 ──────────────────────────────────────────────────
     RISK_PER_TRADE     = 0.01      # legacy: 保留给旧接口/测试；实盘仓位使用 VOL_TARGET_* 参数
-    COST_RATE          = 0.0001    # 单边点差+佣金（forex/metals）
+    # P1-7 修复：COST_RATE 必须与生产 run_backtest.py 的 commission+slippage 一致。
+    # 原 0.0001 仅覆盖点差，未计入手续费/滑点；生产端 run_backtest.py 用
+    # (commission_pct + slippage_pct) / 100 = (0.02 + 0.01) / 100 = 0.0003。
+    # 训练用 0.0001 会让 gate 误判（高 Sharpe 在生产成本下其实不达标），统一为 0.0003。
+    # 同时这也部分补偿 close vs mid 价格偏差（P1-7：训练用 close、实盘用 mid，
+    # spread 未建模，把 cost_rate 抬高到生产水平可吸收大部分 spread 损耗）。
+    COST_RATE          = 0.0003    # 单边：手续费 0.02% + 滑点 0.01%（与 run_backtest.py 一致）
     MAX_OPEN_POSITIONS = 4         # 最多同时持仓品种数
     MAX_LOT_PER_TRADE  = 5.0       # 兜底上限；实际手数由 XAUUSD 0.01 手波动预算决定
     # 永不自动交易的品种（白银合约乘数 5000，2026-07-08 起停用）

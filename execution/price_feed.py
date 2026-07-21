@@ -3,6 +3,18 @@ execution/price_feed.py — MT5 实时价格获取模块
 
 MT5PriceFeed 负责通过 MetaTrader5 Python API 获取指定品种的最新 bid/ask 报价。
 全同步接口，无 asyncio（Req 7.4）。
+
+【P1-7 Train-Serve Skew 注意事项】
+实盘执行用 mid = (bid+ask)/2 价格，但训练特征与 target_ret 全部基于历史 close
+（见 data_pipeline/fetcher.py）。两者偏差 = spread/2，在流动性差或新闻行情下
+可能达到数个 pip，吃掉部分 alpha。当前缓解措施：
+  1. Config.COST_RATE 已统一为 0.0003（=生产 commission+slippage），高于纯点差，
+     可吸收大部分 spread 损耗（见 config.py 注释）。
+  2. 如需精确建模，可在 MT5Backtest 中对 target_ret 扣除 spread_cost：
+     target_ret_adj = target_ret - spread * |position_change|
+     但这需要历史 spread 数据，当前未实现。
+生产监控建议：定期对比训练 backtest Sharpe 与实盘 Sharpe，若偏差 > 30% 应考虑
+加入 spread 模型或调整 COST_RATE 上调。
 """
 try:
     import MetaTrader5 as mt5

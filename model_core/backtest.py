@@ -42,6 +42,12 @@ def estimate_periods_per_year(times) -> int:
     A 股日线（~244 bar/年）、A 股 15min（~3904 bar/年）、加密日线（365 bar/年）
     都会被正确年化，不再被按 H1 放大/缩小。
 
+    P2-5 修复：
+    1. 多品种时按各品种独立估计后取中位数，避免只用第一行（虽然 _align_timelines
+       已对齐时间戳，但 GroupDataManager 路径或自定义数据可能未对齐）。
+    2. 缺时间戳或估计失败时显式告警而非静默回退到 6240（防止 D1/15min 数据被
+       按 H1 年化导致 Sharpe 被放大 26× / 0.4×）。
+
     Args:
         times: [N, T] 或 [T] 的 Unix 秒时间戳（torch.Tensor 或 np.ndarray）。
 
@@ -49,30 +55,69 @@ def estimate_periods_per_year(times) -> int:
         int，每年 bar 数；数据不足时回退到 _H1_PERIODS_PER_YEAR。
     """
     import numpy as _np
+    try:
+        from tqdm import tqdm as _tqdm
+    except ImportError:
+        _tqdm = None
+
+    def _warn(msg: str) -> None:
+        try:
+            if _tqdm is not None:
+                _tqdm.write(msg)
+            else:
+                print(msg)
+        except Exception:
+            pass
+
     if hasattr(times, "detach"):
         arr = times.detach().cpu().numpy()
     else:
         arr = _np.asarray(times)
     arr = arr.astype(_np.float64)
+
+    def _estimate_one(row: _np.ndarray, t_count: int) -> int | None:
+        if t_count < 2:
+            return None
+        span = float(row[-1] - row[0])
+        if span <= 0:
+            return None
+        years = span / _SECONDS_PER_YEAR
+        if years <= 0:
+            return None
+        ppy = t_count / years
+        return int(max(10, min(600000, round(ppy))))
+
     if arr.ndim == 2:
-        t_count = arr.shape[1]
-        row = arr[0]
+        # P2-5: 多品种时按各品种独立估计后取中位数
+        estimates = []
+        for r in range(arr.shape[0]):
+            est = _estimate_one(arr[r], arr.shape[1])
+            if est is not None:
+                estimates.append(est)
+        if not estimates:
+            _warn(
+                "[警告] estimate_periods_per_year: 所有品种时间戳均无效，"
+                "回退到默认 H1=6240。请检查 raw_dict['time'] 是否正确。"
+            )
+            return _H1_PERIODS_PER_YEAR
+        # 取中位数，避免单一品种异常值影响
+        estimates.sort()
+        return estimates[len(estimates) // 2]
     elif arr.ndim == 1:
-        t_count = arr.shape[0]
-        row = arr
+        est = _estimate_one(arr, arr.shape[0])
+        if est is None:
+            _warn(
+                "[警告] estimate_periods_per_year: 时间戳无效或不足，"
+                "回退到默认 H1=6240。请检查 raw_dict['time'] 是否正确。"
+            )
+            return _H1_PERIODS_PER_YEAR
+        return est
     else:
+        _warn(
+            f"[警告] estimate_periods_per_year: 时间戳维度异常 ndim={arr.ndim}，"
+            "回退到默认 H1=6240。"
+        )
         return _H1_PERIODS_PER_YEAR
-    if t_count < 2:
-        return _H1_PERIODS_PER_YEAR
-    span = float(row[-1] - row[0])
-    if span <= 0:
-        return _H1_PERIODS_PER_YEAR
-    years = span / _SECONDS_PER_YEAR
-    if years <= 0:
-        return _H1_PERIODS_PER_YEAR
-    ppy = t_count / years
-    # 合理范围钳制，防止异常时间戳产生极端值
-    return int(max(10, min(600000, round(ppy))))
 
 
 class MT5Backtest:
@@ -80,9 +125,18 @@ class MT5Backtest:
 
     def __init__(
         self,
-        cost_rate:        float = 0.0001,
+        cost_rate:        float | None = None,
         periods_per_year: int   = _H1_PERIODS_PER_YEAR,
     ):
+        # P1-7 修复：cost_rate 单一来源为 Config.COST_RATE，避免训练/回测/实盘
+        # 三处分别硬编码导致不一致（原默认 0.0001 与生产 0.0003 偏差 3x，
+        # 造成 gate 误判高 Sharpe 因子）。None 时读 Config.COST_RATE。
+        if cost_rate is None:
+            try:
+                from config import Config
+                cost_rate = float(Config.COST_RATE)
+            except Exception:
+                cost_rate = 0.0003  # 兜底：与生产 run_backtest.py 一致
         self.cost_rate        = cost_rate
         self.periods_per_year = periods_per_year
 

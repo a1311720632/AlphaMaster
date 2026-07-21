@@ -1,4 +1,4 @@
-﻿"""
+"""
 model_core/features.py -- MT5 Feature Engineering (20 features)
 
 Features:
@@ -141,13 +141,20 @@ class MT5FeatureEngineer:
         彻底消除 look-ahead 泄露。w 默认 200（覆盖足够的历史，warm-up
         期（t<w）用可用数据的局部 median/MAD，填充值为 0 不引入未来）。
 
+        【P1-8 修复】：warm-up 期（t<w-1）窗口中 pad 0 占多数，导致 med=0、
+        MAD=1e-6，输出被强制 clamp 到 ±_CLIP_BOUND（±5）常数——前 199 bar
+        的所有 _norm() 特征都是 ±5 常数，IC 计算失真。修复：warm-up 期
+        输出 0（中性值），等窗口填满后再用真实 median/MAD 归一化。
+
         【实现注意】：torch.median 对 float16 有精度问题，统一转 float32 计算
-        后再转回原 dtype。unfold 窗口中有 pad 的 0（warm-up 期），这些 0 会
-        影响局部 median，对极短序列略有偏差，但严格因果、无未来信息。
+        后再转回原 dtype。
         """
         orig_dtype = x.dtype
         x32 = x.float()
         N, T = x32.shape
+        if T < w:
+            # 数据量不足一个窗口：全部视为 warm-up，输出 0 避免饱和到 ±5
+            return torch.zeros_like(x)
         pad = torch.zeros(N, w - 1, device=x32.device, dtype=x32.dtype)
         wnd = torch.cat([pad, x32], dim=1).unfold(1, w, 1)   # [N, T, w]
         med = wnd.median(dim=-1).values                       # [N, T]，因果
@@ -156,6 +163,9 @@ class MT5FeatureEngineer:
                           -MT5FeatureEngineer._CLIP_BOUND,
                            MT5FeatureEngineer._CLIP_BOUND)
         out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+        # P1-8: warm-up 期（t < w-1）输出 0，避免 pad 0 污染 median/MAD 导致饱和
+        warmup_mask = torch.arange(T, device=x32.device) < (w - 1)
+        out[:, warmup_mask] = 0.0
         return out.to(orig_dtype)
 
     @staticmethod
@@ -487,7 +497,16 @@ class MT5FeatureEngineer:
         close = raw["close"].float(); open_ = raw["open"].float()
         high = raw["high"].float(); low = raw["low"].float()
         eps = cls._EPS
-        return cls._clean(torch.clamp((close - open_) / (high - low + eps), -1.0, 1.0))
+        # P2-13: high==low（休市/无波动）时 (close-open)/eps 是巨大值，被 clamp
+        # 到 ±1 暗示强买压/卖压——实际是无信息状态。修复：检测 high-low < eps
+        # 时输出 0（中性），避免无信息极值污染因子。
+        hl_range = high - low
+        no_range_mask = hl_range.abs() < eps   # [N, T]，True 表示无波动
+        # 无波动位置分母用 1.0 避免除零，结果会被替换为 0
+        safe_range = torch.where(no_range_mask, torch.ones_like(hl_range), hl_range)
+        ratio = (close - open_) / safe_range
+        ratio = torch.where(no_range_mask, torch.zeros_like(ratio), ratio)
+        return cls._clean(torch.clamp(ratio, -1.0, 1.0))
 
     @classmethod
     def _c_ac1(cls, raw: dict) -> torch.Tensor:
@@ -517,19 +536,28 @@ class MT5FeatureEngineer:
         return cls._clean(torch.clamp(cls._ts_corr(ret, log_vol_ratio, 10), -1.0, 1.0))
 
     # 跨截面相对强弱 cross_sectional (17-19)
+    # 注意：N=1（单品种模式）下截面去均值会得到 0 常数。退化为时间序列归一化版本
+    # 以保留特征信息量，避免被公式搜索选中产生虚假因子。
     @classmethod
     def _c_rel_ret5(cls, raw: dict) -> torch.Tensor:
         ret5 = cls._c_ret5(raw)
+        if ret5.shape[0] == 1:
+            # 单品种：直接返回时间序列归一化（与 _c_ret5 等价，但保留词表位置）
+            return cls._clean(ret5)
         return cls._norm(ret5 - ret5.mean(dim=0, keepdim=True))
 
     @classmethod
     def _c_rel_ret20(cls, raw: dict) -> torch.Tensor:
         ret20 = cls._c_ret20(raw)
+        if ret20.shape[0] == 1:
+            return cls._clean(ret20)
         return cls._norm(ret20 - ret20.mean(dim=0, keepdim=True))
 
     @classmethod
     def _c_rel_vol(cls, raw: dict) -> torch.Tensor:
         rvol = cls._c_rvol(raw)
+        if rvol.shape[0] == 1:
+            return cls._clean(rvol)
         return cls._norm(rvol - rvol.mean(dim=0, keepdim=True))
 
     # v3.0 新增特征 (20-25)
@@ -1095,7 +1123,10 @@ class MT5FeatureEngineer:
         lower_band   = mid - 1.5 * atr    # [N, T]
 
         # 递推 direction：+1=上涨趋势，-1=下跌趋势
-        direction = torch.ones(N, T, dtype=close.dtype, device=close.device)
+        # P2-15 修复：原 direction 初始化为 +1（多头偏见），下跌市场初期需等到
+        # 首次 close < prev_lower 才翻转，前若干 bar 误报为多头。
+        # 改为初始化 0（中性），直到首次突破才确定方向。
+        direction = torch.zeros(N, T, dtype=close.dtype, device=close.device)
         prev_upper = upper_band[:, 0]     # [N]（初始化为 t=0 的带值）
         prev_lower = lower_band[:, 0]
         for t in range(1, T):
@@ -1194,8 +1225,16 @@ class MT5FeatureEngineer:
         cumdev = torch.cumsum(centered, dim=-1)                 # [N, T, w]
         R = cumdev.max(dim=-1).values - cumdev.min(dim=-1).values   # [N, T]
         S = centered.pow(2).mean(dim=-1).sqrt()                     # std
-        hurst = torch.log(R / (S + eps) + eps) / math.log(w)       # ≈ Hurst ∈ [0,1]
+        # P2-14: 常数窗口（R=0、S=0，如盘整期无波动）下 log(0+eps)≈-13.8，
+        # clamp 到 0 后映射到 -1（强信号），污染因子。修复：检测 R 或 S 过小
+        # 时输出 0.5（Hurst 中性值），映射为 0（中性）。
+        no_signal_mask = (R < eps) | (S < eps)   # [N, T]
+        safe_S = torch.where(no_signal_mask, torch.ones_like(S), S)
+        safe_R = torch.where(no_signal_mask, torch.ones_like(R), R)
+        hurst = torch.log(safe_R / (safe_S + eps) + eps) / math.log(w)
         hurst = torch.clamp(hurst, 0.0, 1.0)
+        # 无信号位置输出 0.5（Hurst=0.5 即布朗运动，映射为 0）
+        hurst = torch.where(no_signal_mask, torch.full_like(hurst, 0.5), hurst)
         return cls._clean(hurst * 2.0 - 1.0)                   # 映射到 [-1, 1]
 
     @classmethod
@@ -1283,7 +1322,8 @@ class MT5FeatureEngineer:
     def _c_cs_rank_ret5(cls, raw: dict) -> torch.Tensor:
         """5期收益的截面百分位排名（每时间步对 N 品种排名）∈[0,1]。
 
-        N=1 → 0.5；使用 argsort 因果截面排名（不跨时间）。
+        N=1 → 退化为 ret5 的时序归一化（避免输出 0.5 常数被公式搜索误选）。
+        多品种时使用 argsort 因果截面排名（不跨时间）。
         """
         eps   = cls._EPS
         close = raw["close"].float()
@@ -1291,7 +1331,8 @@ class MT5FeatureEngineer:
         ret5_raw = torch.log(close[:, 5:] / (close[:, :-5] + eps))
         ret5 = torch.cat([torch.zeros(N, 5, device=close.device, dtype=close.dtype), ret5_raw], dim=1)  # [N, T]
         if N == 1:
-            return cls._clean(torch.full_like(ret5, 0.5))
+            # 单品种：退化为时间序列归一化，避免常数输出污染公式搜索
+            return cls._clean(cls._norm(ret5))
         # 截面排名（每时间步沿 N 维）
         order = ret5.argsort(dim=0)                 # [N, T] — argsort 沿品种维
         ranks = torch.zeros_like(ret5)
@@ -1303,7 +1344,8 @@ class MT5FeatureEngineer:
     def _c_cs_zscore_ret20(cls, raw: dict) -> torch.Tensor:
         """20期收益的截面 z-score（每时间步跨品种去均值/除标准差）。
 
-        N=1 → 0；robust_norm 兜底防极端值。
+        N=1 → 退化为 ret20 的时序归一化（避免输出 0 常数）。
+        多品种时 robust_norm 兜底防极端值。
         """
         eps   = cls._EPS
         close = raw["close"].float()
@@ -1311,7 +1353,8 @@ class MT5FeatureEngineer:
         ret20_raw = torch.log(close[:, 20:] / (close[:, :-20] + eps))
         ret20 = torch.cat([torch.zeros(N, 20, device=close.device, dtype=close.dtype), ret20_raw], dim=1)  # [N, T]
         if N == 1:
-            return cls._clean(torch.zeros_like(ret20))
+            # 单品种：退化为时间序列归一化，避免常数输出污染公式搜索
+            return cls._clean(cls._norm(ret20))
         cs_mean = ret20.mean(dim=0, keepdim=True)        # [1, T]
         cs_std  = ret20.std(dim=0, keepdim=True) + eps   # [1, T]
         zscore  = (ret20 - cs_mean) / cs_std             # [N, T]

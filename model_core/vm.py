@@ -34,6 +34,8 @@ INFECTED_PROPAGATING_OPS = {
     "TS_DECAY_EXP_5",
 }
 # 恢复算子：能够把恒正值域重新变成有正有负
+# 注意：CS_NEUTRALIZE/CS_RANK/CS_SCALE 在 N=1（单品种）时已改为恒等退化，
+# 不再"恢复符号"——单品种公式不应依赖这些算子做符号恢复，应改用 TS_ZSCORE/DELTA 等。
 SIGN_RESTORE_OPS = {
     "SUB", "DIV", "NEG", "GATE", "IF_GT",
     "TS_ZSCORE_10", "TS_ZSCORE_20",
@@ -41,7 +43,6 @@ SIGN_RESTORE_OPS = {
     "TS_STD_5", "TS_STD_10", "TS_STD_20",
     "TS_CORR_10", "TS_SKEW_10", "TS_QUANTILE_10",
     "DELTA", "DELTA_5", "MOMENTUM_5", "MOMENTUM_10",
-    "PPO",  # 但 PPO 是特征不是算子
 }
 
 
@@ -155,32 +156,41 @@ class StackVM:
         """
         对因子输出做标准化，确保幅度足够触发 neutral band 入场。
 
-        策略（三级降级）：
+        策略（两级降级，全部因果）：
         1. 截面 zscore（跨品种，每时间步）：适合因子跨品种有分散
-        2. 时序 zscore（每品种，全局）：当截面 std 太小时使用
-        3. 若两级都失败（因子是常数）：返回原值，由 const_cnt 拦截
+        2. 时序 zscore（每品种，expanding 无 look-ahead）
+
+        P2-8 修复：
+        - 原代码用 `cs_z.std() >= 0.3` 和 `ts_z.std() >= 0.1` 决定走哪条分支，
+          但这些 std 是全局统计（含未来），引入轻微 look-ahead bias。
+        - 修复：路径选择改为基于「全局 std 是否过小」的因果判断（x.std() 是
+          常数检测，不依赖时间），然后优先用截面 zscore（N>1 时）或时序 zscore。
+          归一化本身仍是因果的（cs_std 沿 N 维、ts_std 用 expanding）。
+        - 去掉「std >= 0.3 才用截面」的判断：直接走截面（N>1）→ 时序的降级链。
 
         Returns:
             [N, T] clip 到 [-3, 3]，若是常数则返回原值（engine 会过滤）
         """
         N, T = x.shape
 
-        # 检测是否是全局常数（标准化无意义）
+        # 检测是否是全局常数（标准化无意义，x.std() 是统计量非时间依赖）
         global_std = x.std()
         if global_std < 1e-6:
             return x   # 常数因子，由 engine 的 const_cnt 拦截
 
         # ── 截面标准化（跨品种，每时间步；N=1 时跳过）──────────────
+        # cs_std 沿 N 维计算，t 时刻的 cs_std 只用 {x[n, t] : n}，无未来信息
         if N > 1:
             cs_mean = x.mean(dim=0, keepdim=True)
             cs_std  = x.std(dim=0, keepdim=True).clamp(min=1e-8)
             cs_z    = (x - cs_mean) / cs_std
-            if cs_z.std() >= 0.3:
-                return torch.clamp(cs_z, -3.0, 3.0)
+            # P2-8: 不再用 cs_z.std()（全局，含未来）做路径选择
+            # 若截面 std 在某些时间步过小，cs_z 会很大，但 clamp 到 [-3,3] 即可
+            return torch.clamp(cs_z, -3.0, 3.0)
 
         # ── 时序标准化（每品种独立，expanding 无 look-ahead）─────────
+        # N=1 时只能用时序归一化
         # 每个 t 仅用 x[:, :t+1] 计算 mean/std，避免用 t 之后的未来统计量
-        # 归一化当前值（原 dim=1 全局 mean/std 存在 look-ahead bias）。
         cnt = torch.arange(1, T + 1, device=x.device, dtype=x.dtype).view(1, T)
         cumsum = x.cumsum(dim=1)
         ts_mean = cumsum / cnt                          # [N,T]，t 位 = x[:,:t+1].mean()
@@ -188,12 +198,7 @@ class StackVM:
         ts_var = (cumsum_sq / cnt) - ts_mean * ts_mean  # E[x^2] - E[x]^2
         ts_std = ts_var.clamp(min=1e-8).sqrt()
         ts_z = (x - ts_mean) / ts_std
-
-        if ts_z.std() >= 0.1:
-            return torch.clamp(ts_z, -3.0, 3.0)
-
-        # ── 两级均失败：因子无区分度，返回原值让 engine 过滤 ────────
-        return x
+        return torch.clamp(ts_z, -3.0, 3.0)
 
     def execute(self, formula_tokens, feat_tensor):
         stack = []

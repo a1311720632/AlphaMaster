@@ -2,6 +2,7 @@ import copy
 import heapq
 import json
 import math
+import os
 import pathlib
 import random
 import sys
@@ -77,6 +78,14 @@ def _fallback_data_file_for_symbol(symbol: str) -> tuple[str | None, str | None]
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_walk_forward_folds(T: int, n_folds: int = 5, gap: int = 20) -> list[dict]:
+    """构建 Walk-Forward 折叠。
+
+    改为 rolling window（train_start = (k-1)*fold_size）以避免 expanding window
+    导致早期折的 val 数据被后续折的 train 切片包含，造成 val_score 不再严格 OOS。
+
+    同时修正最后一折 val_end = min(val_start + fold_size, T)，避免最后一折 val
+    大小不均导致均值被该折主导。
+    """
     fold_size = T // n_folds
     if fold_size < 2:
         return [{"train_start": 0, "train_end": T, "val_start": 0, "val_end": T, "gap": 0}]
@@ -85,12 +94,15 @@ def _build_walk_forward_folds(T: int, n_folds: int = 5, gap: int = 20) -> list[d
         gap = max(0, (T - fold_size * n_folds) // n_folds)
     folds = []
     for k in range(1, n_folds):
-        train_end = fold_size * k
-        val_start = train_end + gap
-        val_end   = val_start + fold_size if k < n_folds - 1 else T
-        if val_start >= T or val_end > T:
+        # rolling window：每折 train 起点前移，避免包含早期折的 val 切片
+        train_start = (k - 1) * fold_size
+        train_end   = k * fold_size
+        val_start   = train_end + gap
+        # 最后一折 val_end 用 min 避免超出 T，且与其他折大小一致
+        val_end     = min(val_start + fold_size, T)
+        if val_start >= T or val_end <= val_start:
             break
-        folds.append({"train_start": 0, "train_end": train_end,
+        folds.append({"train_start": train_start, "train_end": train_end,
                       "val_start": val_start, "val_end": val_end, "gap": gap})
     if not folds:
         return [{"train_start": 0, "train_end": T, "val_start": 0, "val_end": T, "gap": 0}]
@@ -373,15 +385,38 @@ class AlphaEngine:
         elif val_score > self.factor_pool[0][0]:
             heapq.heapreplace(self.factor_pool, entry)
 
-    def _apply_corr_penalty(self, reward: torch.Tensor, factor: torch.Tensor) -> torch.Tensor:
+    def _apply_corr_penalty(
+        self,
+        reward: torch.Tensor,
+        factor: torch.Tensor,
+        train_slice: tuple[int, int] | None = None,
+    ) -> torch.Tensor:
+        """相关性惩罚：与因子池中已有因子的相关性超过阈值则惩罚 reward。
+
+        P1-6 修复：相关性只在 train 切片上计算，避免含 val 段数据泄漏。
+        train_slice=None 时回退到整段（向后兼容）。
+        """
         if not self.factor_pool:
             return reward
-        f_flat = factor.detach().reshape(-1).float()
+        # P1-6: 相关性只在 train 切片上计算，避免 val 信息泄漏
+        if train_slice is not None:
+            s, e = train_slice
+            f = factor.detach()[:, s:e]
+        else:
+            f = factor.detach()
+        f_flat = f.reshape(-1).float()
         if f_flat.std() < 1e-4:
             return reward
-        pool_vecs = torch.stack(
-            [f.reshape(-1).float() for _, _cnt, f in self.factor_pool], dim=0
-        )
+        # 因子池中的历史因子也按相同切片取（若形状一致）
+        pool_vecs_list = []
+        for _, _cnt, pf in self.factor_pool:
+            pf_t = pf.detach()
+            if train_slice is not None and pf_t.shape[1] >= factor.shape[1]:
+                pf_t = pf_t[:, s:e]
+            pool_vecs_list.append(pf_t.reshape(-1).float())
+        if not pool_vecs_list:
+            return reward
+        pool_vecs = torch.stack(pool_vecs_list, dim=0)
         f_c  = f_flat - f_flat.mean()
         p_c  = pool_vecs - pool_vecs.mean(dim=1, keepdim=True)
         cov  = (p_c * f_c).sum(dim=1)
@@ -462,7 +497,7 @@ class AlphaEngine:
             if use_wf:
                 print(f"   滚动验证: {len(folds)} 折  共 {T} 根K线")
                 for k, f in enumerate(folds):
-                    print(f"  第{k+1}折: 训练[0,{f['train_end']}) "
+                    print(f"  第{k+1}折: 训练[{f['train_start']},{f['train_end']}) "
                           f"间隔={f['gap']} 验证[{f['val_start']},{f['val_end']})")
             else:
                 print(f"   退化为全量评估（共 {T} 根K线）")
@@ -648,19 +683,43 @@ class AlphaEngine:
                             )
                             tr_adj = AlphaEngine._apply_ic_gate(tr_sc, ic_m)
                             fold_tr.append(ModelConfig.REWARD_ALPHA * tr_adj)
-                            fold_vl.append(vl_sc)
+                            # P1-5: IC 门控也作用于 val_score（用 val 切片 IC）
+                            # 防止 IC 强负但 val Sortino 偶然为正的因子登顶冠军
+                            ic_v, _ = AlphaEngine._compute_ic(
+                                res[:, fold["val_start"]:fold["val_end"]],
+                                t_ret[:, fold["val_start"]:fold["val_end"]],
+                            )
+                            vl_adj = AlphaEngine._apply_ic_gate(vl_sc, ic_v)
+                            fold_vl.append(vl_adj)
                             fold_ic.append(ic_m.item())
                         train_score = torch.stack(fold_tr).mean()
                         val_score   = torch.stack(fold_vl).mean()
                         ic_i        = sum(fold_ic) / len(fold_ic)
                     else:
+                        # P1-4: 非 WF 模式也分离 train/val（后 20% 作 val_score）
+                        # 避免 val_score = train_score 导致冠军选择无 OOS 保障
+                        T_total = res.shape[1]
+                        split_pt = max(int(T_total * 0.8), T_total - 100)
                         train_score, _ = self.bt.evaluate(res, {}, t_ret)
                         ic_m0, _  = AlphaEngine._compute_ic(res, t_ret)
                         train_score = AlphaEngine._apply_ic_gate(
                             ModelConfig.REWARD_ALPHA * train_score, ic_m0
                         )
-                        val_score = train_score
-                        ic_i      = ic_m0.item()
+                        # 用后 20% 作 val_score（OOS 评估）
+                        if split_pt < T_total - 1:
+                            vl_sc, _ = self.bt.evaluate_fold(
+                                res, t_ret,
+                                0, split_pt,           # train 切片（不参与 val 评估）
+                                split_pt, T_total,     # val 切片
+                            )
+                            ic_v0, _ = AlphaEngine._compute_ic(
+                                res[:, split_pt:],
+                                t_ret[:, split_pt:],
+                            )
+                            val_score = AlphaEngine._apply_ic_gate(vl_sc, ic_v0)
+                        else:
+                            val_score = train_score
+                        ic_i = ic_m0.item()
                     ic_full, ic_stab_full = AlphaEngine._compute_ic(res, t_ret)
 
                 rewards[i]    = train_score
@@ -670,12 +729,19 @@ class AlphaEngine:
 
                 # 重复惩罚和相关性惩罚同时施加到 rewards 和 val_scores
                 # 保证 best_score / elite_pool 选优时已含所有惩罚
+                # P1-6: 相关性只在 train 切片上计算，避免 val 段数据泄漏
+                if use_wf:
+                    # 多折场景：用第一折 train 切片做相关性（保守估计）
+                    _corr_slice = (folds[0]["train_start"], folds[0]["train_end"])
+                else:
+                    # 非 WF 场景：用前 80% 作 train 切片
+                    _corr_slice = (0, max(int(res.shape[1] * 0.8), res.shape[1] - 100))
                 rp = _repetition_penalty(fml)
                 if rp > 0:
                     rewards[i]    -= rp
                     val_scores[i] -= rp
-                rewards[i]    = self._apply_corr_penalty(rewards[i], res)
-                val_scores[i] = self._apply_corr_penalty(val_scores[i], res)
+                rewards[i]    = self._apply_corr_penalty(rewards[i], res, _corr_slice)
+                val_scores[i] = self._apply_corr_penalty(val_scores[i], res, _corr_slice)
 
                 # 用含惩罚的 val_scores[i] 选全局最优
                 final_val = val_scores[i].item()
@@ -974,8 +1040,11 @@ class AlphaEngine:
                 }
                 save_path = _strategy_file_for_symbol(self.target_symbol)
                 pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(save_path, "w") as fp:
-                    json.dump(strategy_data, fp, indent=2)
+                # P1-3: 原子写入
+                tmp_path = save_path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as fp:
+                    json.dump(strategy_data, fp, indent=2, ensure_ascii=False)
+                os.replace(tmp_path, save_path)
 
             sym_tag = f"[{self.target_symbol}] " if self.target_symbol else ""
             self.training_history.pop('_low_entropy_streak', None)
@@ -983,8 +1052,11 @@ class AlphaEngine:
                 f"training_history_{self.target_symbol}.json"
                 if self.target_symbol else "training_history.json"
             )
-            with open(hist_path, "w") as fp:
+            # P1-3: 原子写入
+            tmp_hist = hist_path + ".tmp"
+            with open(tmp_hist, "w", encoding="utf-8") as fp:
                 json.dump(self.training_history, fp)
+            os.replace(tmp_hist, hist_path)
 
             print(f"\n[完成] {sym_tag}训练结束！")
             print(f"  最优验证分数 : {self.best_score:.4f}")
@@ -1000,7 +1072,11 @@ class AlphaEngine:
 
     # ── 实时保存最优公式（防进程意外退出丢失）────────────────────────────────
     def _save_training_history_live(self) -> None:
-        """周期性写入训练曲线 JSON，供 Web UI 实时展示。"""
+        """周期性写入训练曲线 JSON，供 Web UI 实时展示。
+
+        P1-3 修复：原子写入（tmp + os.replace），避免 Ctrl+C / OOM 打断写入
+        导致 history 文件损坏。异常打印告警而非静默吞掉。
+        """
         if not self.target_symbol:
             return
         try:
@@ -1009,14 +1085,24 @@ class AlphaEngine:
                 k: v for k, v in self.training_history.items()
                 if k != "_low_entropy_streak"
             }
-            with open(hist_path, "w", encoding="utf-8") as fp:
+            # 原子写入：先写 tmp，再 os.replace 覆盖（POSIX/Windows 均原子）
+            tmp_path = hist_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fp:
                 json.dump(payload, fp)
-        except Exception:
-            pass
+            os.replace(tmp_path, hist_path)
+        except Exception as exc:  # noqa: BLE001
+            # 静默吞掉会掩盖磁盘满/权限错误，至少打印告警
+            try:
+                tqdm.write(f"[警告] 训练历史保存失败: {exc}")
+            except Exception:
+                pass
 
     def _save_strategy_live(self) -> None:
         """每次 best_formula 更新时立即保存 strategy json。
         即使训练中途进程被杀（OOM/终端回收/Ctrl+C），也能保留最新最优公式。
+
+        P1-3 修复：原子写入（tmp + os.replace），避免写入中途被打断导致
+        strategy JSON 截断损坏——既丢新最优也丢旧最优。异常打印告警。
         """
         if self.best_formula is None:
             return
@@ -1058,10 +1144,17 @@ class AlphaEngine:
                 if data_file and not strategy_data.get("mode"):
                     strategy_data["mode"] = "parquet_file"
 
-            with open(save_path, "w", encoding="utf-8") as fp:
+            # 原子写入：先写 tmp，再 os.replace 覆盖
+            tmp_path = save_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fp:
                 json.dump(strategy_data, fp, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+            os.replace(tmp_path, save_path)
+        except Exception as exc:  # noqa: BLE001
+            # 静默吞掉会让用户误以为策略已保存，实则没有
+            try:
+                tqdm.write(f"[警告] 策略保存失败: {exc}")
+            except Exception:
+                pass
 
     # ── Checkpoint save / load ────────────────────────────────────────────────
 
@@ -1088,7 +1181,11 @@ class AlphaEngine:
                 if k != '_low_entropy_streak'
             },
         }
-        torch.save(ckpt, path)
+        # P1-3: 原子写入（tmp + os.replace），避免 Ctrl+C / OOM 打断导致
+        # checkpoint 文件截断损坏——既丢新最优也丢旧最优
+        tmp_path = path + ".tmp"
+        torch.save(ckpt, tmp_path)
+        os.replace(tmp_path, path)
         return path
 
     def load_checkpoint(self, path: str) -> int:
@@ -1107,7 +1204,7 @@ class AlphaEngine:
         FORMULA_VOCAB.verify(artifact_version)
         # ── 版本校验通过，继续加载 ────────────────────────────────────────
 
-        self.model.load_state_dict(ckpt["model_state_dict"])
+        self.model.load_state_dict(ckpt["model_state_dict"], strict=False)
         self.opt.load_state_dict(ckpt["optimizer_state_dict"])
         self.best_score          = ckpt.get("best_score",  -float('inf'))
         self.best_formula        = ckpt.get("best_formula", None)

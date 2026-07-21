@@ -42,7 +42,7 @@ _TF_SECONDS = {
     "1M": 2592000,  # 近似 30 天
 }
 _DEFAULT_CADENCE = 60
-_N_BARS = 500                 # 每次拉取的历史 bar 数（喂给特征引擎）
+_N_BARS = 3500                # 每次拉取的历史 bar 数（喂给特征引擎，需 ≥ Config.MIN_BARS=3000）
 _HISTORY_LEN = 60             # 保留的信号强度历史点数（供 sparkline）
 _VALID_KINDS = {k for k, _ in SOURCE_KINDS}
 

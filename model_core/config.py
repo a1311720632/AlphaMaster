@@ -134,6 +134,13 @@ class ModelConfig:
     CORR_PENALTY:     float = 0.8
 
     # ── Walk-Forward Gap ───────────────────────────────────────────────
+    # P2-6 修复说明：gap 必须按 target_horizon 标定，且与 CPCV purge gap 统一。
+    # 当前 target_horizon=2（data_manager 用 log(open[t+2]/open[t+1]) 作 target_ret），
+    # gap=20 相当于 10 个「真实预测步」——对 H1 数据足够，但若切换到 D1/15min
+    # 需要重新评估。CPCV 模式（未实现）的 purge gap 应等于 WF_GAP，避免两套阈值。
+    # 调整时同时检查：
+    #   1. engine.py _build_walk_forward_folds 的 val_start = train_end + gap
+    #   2. fold_size 应 >> gap（建议 fold_size >= 5*gap）以保证 val 有效性
     WF_GAP: int = 20
 
     # ── 公式结构约束（2026-07-05 新增）──────────────────────────────────

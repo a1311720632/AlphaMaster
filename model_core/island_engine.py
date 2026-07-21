@@ -118,10 +118,18 @@ class IslandAlphaEngine:
 
             # 同步全局最优到每个 island 的 best_snapshot
             # 这样下次 restart 时可以从全局最优恢复，而非局部最优
-            for isl in self.islands:
-                if self.global_best_score > isl.best_score:
-                    isl.best_score = self.global_best_score
-                    isl.best_formula = copy.deepcopy(self.global_best_formula)
+            # P1-2 修复：同时同步 _best_snapshot，否则 restart 时加载的仍是
+            # island 局部 snapshot，而非全局最优——与注释承诺不符。
+            best_isl_idx = self.global_best_island
+            if best_isl_idx >= 0 and best_isl_idx < len(self.islands):
+                best_isl = self.islands[best_isl_idx]
+                for isl in self.islands:
+                    if self.global_best_score > isl.best_score:
+                        isl.best_score = self.global_best_score
+                        isl.best_formula = copy.deepcopy(self.global_best_formula)
+                        # 同步模型 snapshot，restart 时能从全局最优恢复
+                        if best_isl._best_snapshot is not None:
+                            isl._best_snapshot = copy.deepcopy(best_isl._best_snapshot)
 
         # 最终保存全局最优
         self._update_global_best()

@@ -94,6 +94,39 @@ class MT5Source(DataSource):
                 pass
         self._connected = False
 
+    def _fallback_local_cache(
+        self, symbol: str, timeframe: str, n: int, drop_forming: bool = True
+    ) -> list[Bar] | None:
+        """MT5 无实时数据时，从本地 K 线缓存（D:\\K线数据）读取。"""
+        try:
+            import pandas as pd
+            from pathlib import Path
+            cache_dir = Path(r"D:\K线数据")
+            path = cache_dir / f"{symbol}_{timeframe.upper()}.parquet"
+            if not path.exists():
+                return None
+            df = pd.read_parquet(path)
+            if df.empty:
+                return None
+            rows = df.tail(n + (1 if drop_forming else 0)).to_dict("records")
+            if drop_forming and len(rows) > 1:
+                rows = rows[:-1]
+            bars: list[Bar] = []
+            offset = self._server_offset or 0
+            for r in rows:
+                vol = float(r.get("tick_volume", 0))
+                bars.append(Bar(
+                    ts=int(r["time"]) - offset,
+                    open=float(r["open"]),
+                    high=float(r["high"]),
+                    low=float(r["low"]),
+                    close=float(r["close"]),
+                    volume=vol,
+                ))
+            return bars if bars else None
+        except Exception:
+            return None
+
     def fetch_bars(
         self, symbol: str, timeframe: str, n: int, drop_forming: bool = True
     ) -> list[Bar]:
@@ -115,6 +148,10 @@ class MT5Source(DataSource):
             rates = mt5.copy_rates_from_pos(symbol, tf_const, 0, fetch_n)
 
         if rates is None or len(rates) == 0:
+            # MT5 无数据时回退到本地 K 线缓存
+            fallback = self._fallback_local_cache(symbol, timeframe, n, drop_forming)
+            if fallback:
+                return fallback
             raise DataSourceUnavailable(
                 f"MT5 无法获取 {symbol} {timeframe} 数据 {mt5.last_error()}"
             )

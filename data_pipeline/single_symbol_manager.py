@@ -46,6 +46,8 @@ class SingleSymbolDataManager:
         self._multi  = multi_manager
         self._symbol = symbol
         self._idx    = multi_manager.symbols.index(symbol)
+        # P2-16: 特征张量缓存，避免每次访问重算 65 个特征
+        self._feat_cache: torch.Tensor | None = None
 
         logger.info(f"[SingleSymbolDataManager] symbol={symbol}  idx={self._idx}")
 
@@ -62,9 +64,21 @@ class SingleSymbolDataManager:
 
     @property
     def feat_tensor(self) -> torch.Tensor:
-        """返回 [1, F, T] 特征张量（只含目标品种）。"""
-        raw = self.raw_dict
-        return MT5FeatureEngineer.compute_features(raw)   # [1, F, T]
+        """返回 [1, F, T] 特征张量（只含目标品种）。
+
+        P2-16 修复：缓存计算结果，避免每次访问都重算 65 个特征。
+        AlphaEngine 训练时每步访问一次 feat_tensor，原本每次都要重新计算
+        30+ 个 rolling/expanding 统计量，浪费 CPU。数据加载后 raw_dict 不变，
+        特征输出是确定性的，缓存一次即可。如需刷新，调用 invalidate_cache()。
+        """
+        if self._feat_cache is None:
+            raw = self.raw_dict
+            self._feat_cache = MT5FeatureEngineer.compute_features(raw)   # [1, F, T]
+        return self._feat_cache
+
+    def invalidate_cache(self) -> None:
+        """显式失效缓存（数据重新加载后调用）。"""
+        self._feat_cache = None
 
     @property
     def target_ret(self) -> torch.Tensor:

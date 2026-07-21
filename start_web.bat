@@ -1,6 +1,6 @@
 @echo off
 title AlphaMaster Web Server
-cd /d "C:\Alpha_master"
+cd /d "D:\cl\AlphaMaster"
 
 echo ============================================================
 echo   AlphaMaster - Quant Factor Mining Center

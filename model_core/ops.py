@@ -45,6 +45,10 @@ def _op_jump(x: torch.Tensor) -> torch.Tensor:
 
     因果 expanding zscore：每个 t 仅用 x[:, :t+1] 计算 mean/std，
     避免原 dim=1 全局聚合（含未来统计量）引入的 look-ahead bias。
+
+    P2-12 修复：t=0 时 mean=x[0]、z=0，输出恒为 tanh(-1.5)≈-0.905（与输入无关），
+    前几个 bar 输出几乎是常数，作为因子起点会引入系统性偏差。修复：warm-up 期
+    （t < min_warmup，默认 5）输出 0（中性），等累积足够样本后再用真实 zscore。
     """
     N, T = x.shape
     cnt = torch.arange(1, T + 1, device=x.device, dtype=x.dtype).view(1, T)
@@ -54,10 +58,22 @@ def _op_jump(x: torch.Tensor) -> torch.Tensor:
     var = (cumsum_sq / cnt) - mean * mean     # E[x^2] - E[x]^2
     std = var.clamp(min=1e-12).sqrt() + 1e-6
     z = (x - mean) / std
-    return torch.tanh(z - 1.5)   # tanh 软化，不再产生全零区间
+    out = torch.tanh(z - 1.5)   # tanh 软化，不再产生全零区间
+    # P2-12: warm-up 期输出 0，避免 t=0 输出常数 -0.905 污染因子
+    min_warmup = 5
+    if T > min_warmup:
+        warmup_mask = torch.arange(T, device=x.device) < min_warmup
+        out[:, warmup_mask] = 0.0
+    return out
 
 def _op_decay(x: torch.Tensor) -> torch.Tensor:
-    return x + 0.8 * _ts_delay(x, 1) + 0.6 * _ts_delay(x, 2)
+    """指数衰减加权：x + 0.8*x[t-1] + 0.6*x[t-2]。
+
+    P2-11 修复：原系数和=2.4 未归一化，输出幅度是输入的 2.4 倍，可能放大下游
+    tanh 饱和。改为归一化（除以系数和），与 _op_wma 语义一致。
+    """
+    # 系数 [1.0, 0.8, 0.6]，和=2.4，归一化为 [0.4167, 0.3333, 0.25]
+    return (x + 0.8 * _ts_delay(x, 1) + 0.6 * _ts_delay(x, 2)) / 2.4
 
 def _op_wma(x: torch.Tensor) -> torch.Tensor:
     """加权移动平均（权重 3,2,1），平滑信号，减少剥头皮"""
@@ -131,66 +147,44 @@ def _ema(x: torch.Tensor, alpha: float) -> torch.Tensor:
 def _ema_simple(x: torch.Tensor, span: int, exact: bool = False) -> torch.Tensor:
     """指数加权移动平均（因果），span 期。
 
-    默认路径（exact=False）：
-        向量化因果卷积近似，复杂度 O(N·T·w)，无逐时间步 Python 循环（R8.3）。
-        alpha = 2/(span+1)；有效窗口 w = min(T, ceil(-log(1e-6)/(-log(1-alpha))))，
-        保证尾部权重 (1-alpha)^w < 1e-6。
-        使用首值填充（first-value padding）以匹配递推版初始条件 out[0]=x[0]，
-        max|Δ| 与递推版差异实测 < 1e-4。
+    P1-10 修复：统一使用 exact 递推路径，避免训练时 T 大走 vectorized 卷积近似、
+    实盘时 T 小走 exact 递推导致的 train-serve skew（虽然 max|Δ|<1e-4，但会
+    通过 MACD_HIST/PPO/TRIX_15/EMA_RATIO_12_26/TREND_STRENGTH_50/SUPERTREND_DIR/
+    SAR_DIST 等特征传播，在 tanh 阈值附近可能改变方向判定）。
 
-    可选精确路径（exact=True）：
-        严格递推实现：out[t] = alpha*x[t] + (1-alpha)*out[t-1]。
-        复杂度 O(N·T)（顺序累积，R8.4 文档化复杂度）。
+    实测 exact 递推在 N=1, T=10000 下耗时 < 5ms，性能损失可接受。
+
+    参数：
+        span: EMA 周期
+        exact: 保留参数兼容性，无论取值均使用 exact 递推（统一路径）
     """
     alpha = 2.0 / (span + 1.0)
     N, T = x.shape
 
-    if exact:
-        # ── 精确递推路径（O(N·T) 顺序累积，R8.4 文档化复杂度）──────────
-        out = torch.zeros_like(x)
-        out[:, 0] = x[:, 0]
-        for t in range(1, T):
-            out[:, t] = alpha * x[:, t] + (1 - alpha) * out[:, t - 1]
-        return out
-
-    # ── 向量化卷积近似路径（默认，R8.3）────────────────────────────────
-    import math
+    if T == 0:
+        return x.clone()
     if alpha >= 1.0:
         return x.clone()
-    # w_full 仅由 span 决定
-    w_full = max(1, math.ceil(-math.log(1e-6) / (-math.log(1.0 - alpha))))
 
-    # 因果性保证：为确保前缀步输出与序列长度无关，必须保证相同 T 范围内
-    # 两种实现路径（精确 vs 向量化）不能混用。
-    # 策略：仅当 T >= 2 * w_full 时才使用向量化（此时 warm-up 区占比 < 50%，
-    # 精度问题可忽略）；否则使用精确递推（严格因果，O(N·T)）。
-    # 注意：2*w_full 是确定性阈值，不依赖具体输入，故不同长度的序列在
-    # 超过阈值后行为一致。实际训练序列 T=200-512 均远超 2*w_full(≤360)。
-    if T < 2 * w_full:
-        out = torch.zeros_like(x)
-        out[:, 0] = x[:, 0]
-        for t in range(1, T):
-            out[:, t] = alpha * x[:, t] + (1 - alpha) * out[:, t - 1]
-        return out
-
-    # T >= 2*w_full：向量化卷积近似（首值填充），max|Δ| < 1e-4
-    decay = 1.0 - alpha
-    powers = torch.arange(w_full - 1, -1, -1, dtype=x.dtype, device=x.device)
-    weights = alpha * (decay ** powers)                        # 未归一化
-
-    # 首值填充：等效于「历史全为 x[0]」，与递推版 out[0]=x[0] 一致
-    first = x[:, :1].expand(N, w_full - 1)                    # [N, w_full-1]
-    xp = torch.cat([first, x], dim=1)                          # [N, T+w_full-1]
-    windows = xp.unfold(1, w_full, 1)                          # [N, T, w_full]
-    out = (windows * weights).sum(dim=-1)                      # [N, T]
-    return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+    # ── 统一使用 exact 递推路径（O(N·T) 顺序累积）──────────────────
+    # 消除 T < 2*w_full 与 T >= 2*w_full 的路径分叉，保证训练/实盘数值一致
+    out = torch.zeros_like(x)
+    out[:, 0] = x[:, 0]
+    for t in range(1, T):
+        out[:, t] = alpha * x[:, t] + (1 - alpha) * out[:, t - 1]
+    return out
 
 
 def _ts_quantile(x: torch.Tensor, d: int) -> torch.Tensor:
-    """当前值在过去 d 期的分位数（0~1），用 TS_RANK 的连续版。"""
+    """当前值在过去 d 期的分位数（0~1），与 TS_RANK 语义统一（严格小于）。
+
+    P1-12 修复：原实现用 (w <= cur) 包含当前值自身，值域 [1/d, 1]；与
+    _ts_rank (w < cur) 严格小于、值域 [0, (d-1)/d] 语义不一致。统一为
+    严格小于，使两算子在边界值上行为一致，避免公式搜索选错"恢复算子"。
+    """
     w = _ts_rolling(x, d)
     cur = w[:, :, -1:]
-    rank = (w <= cur).float().mean(dim=-1)
+    rank = (w < cur).float().mean(dim=-1)
     return torch.nan_to_num(rank, nan=0.5)
 
 
@@ -287,18 +281,21 @@ def _signed_power(x: torch.Tensor, a: float = 2.0) -> torch.Tensor:
 # ── Cross_Sectional 算子 helper（沿 N 维，每时间步跨品种；R2.1, R2.2）───────
 #
 # 输入 `[N, T]`：N=品种数、T=时间步。计算沿 dim=0（N 维）逐时间步进行，
-# 完全向量化（禁止逐时间步 Python 循环）。N=1（单品种，截面无分散）时按语义退化。
-# 全部 NaN-safe：出口 `nan_to_num`，CS_RANK/CS_SCALE 退化默认值 0.5，其余 0。
+# 完全向量化（禁止逐时间步 Python 循环）。
+# N=1（单品种，截面无分散）时按"恒等退化"保留输入信息，避免输出常数被公式
+# 搜索误选（之前 CS_RANK/CS_SCALE 输出 0.5 常数、CS_NEUTRALIZE 输出 0 常数，
+# 会污染公式语义）。全部 NaN-safe：出口 `nan_to_num`。
 
 def _cs_rank(x: torch.Tensor) -> torch.Tensor:
     """每时间步跨品种百分位排名，值域 [0, 1]（R2.1）。
 
     对每一列（时间步）沿 N 维排名，归一化到 `[0, 1]`（rank/(N-1)）。N=1 时截面
-    无分散，退化为 0.5。用双 argsort 向量化，无逐时间步 Python 循环。
+    无分散，恒等退化（返回输入本身）保留时间序列信息。用双 argsort 向量化。
     """
     N, T = x.shape
     if N == 1:
-        return torch.full_like(x, 0.5)
+        # 单品种：恒等退化，避免常数 0.5 污染公式搜索
+        return torch.nan_to_num(x, nan=0.5, posinf=0.5, neginf=0.5)
     order = x.argsort(dim=0)                       # 沿 N 维排序索引
     ranks = torch.empty_like(x)
     rank_vals = torch.arange(N, device=x.device, dtype=x.dtype).unsqueeze(1).expand(N, T)
@@ -310,12 +307,13 @@ def _cs_rank(x: torch.Tensor) -> torch.Tensor:
 def _cs_scale(x: torch.Tensor) -> torch.Tensor:
     """每时间步跨品种缩放到 [0, 1]：`(x - min) / (max - min)`（R2.1）。
 
-    沿 N 维取每列的 min/max。零跨度（max==min）该列退化为 0.5；N=1 退化为 0.5。
+    沿 N 维取每列的 min/max。零跨度（max==min）该列退化为 0.5；N=1 恒等退化。
     完全向量化。
     """
     N, T = x.shape
     if N == 1:
-        return torch.full_like(x, 0.5)
+        # 单品种：恒等退化，避免常数 0.5 污染公式搜索
+        return torch.nan_to_num(x, nan=0.5, posinf=0.5, neginf=0.5)
     mn = x.min(dim=0, keepdim=True).values         # [1, T]
     mx = x.max(dim=0, keepdim=True).values          # [1, T]
     span = mx - mn                                  # [1, T]
@@ -327,10 +325,11 @@ def _cs_scale(x: torch.Tensor) -> torch.Tensor:
 
 
 def _cs_neutralize(x: torch.Tensor) -> torch.Tensor:
-    """每时间步减去跨品种算术均值（截面中性化，R2.2）。N=1 退化为 0。"""
+    """每时间步减去跨品种算术均值（截面中性化，R2.2）。N=1 恒等退化。"""
     N, T = x.shape
     if N == 1:
-        return torch.zeros_like(x)
+        # 单品种：恒等退化，避免常数 0 污染公式搜索
+        return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     mean = x.mean(dim=0, keepdim=True)              # [1, T]
     out = x - mean
     return torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)

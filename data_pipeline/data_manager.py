@@ -245,7 +245,10 @@ class MT5DataManager:
             aligned: dict[str, pd.DataFrame] = {}
             for symbol, sub in indexed.items():
                 reindexed = sub.reindex(union_index)
-                reindexed = reindexed.ffill().bfill()
+                # 仅使用 ffill（因果填充），禁止 bfill 以避免未来信息泄漏
+                reindexed = reindexed.ffill()
+                # 起始处的 NaN（无历史数据）填充为 0，避免下游 log/divide 出 -inf
+                reindexed = reindexed.fillna(0.0)
                 aligned[symbol] = reindexed[fields]
             return aligned
 

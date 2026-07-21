@@ -801,7 +801,10 @@ class EffectivenessEvaluator:
     eval_window : int
         评估窗口大小，默认 250（R4）。
     target_horizon : int
-        前视收益 horizon，用于 _align_causal，默认 1（R4.7）。
+        前视收益 horizon，用于 _align_causal，默认 2（R4.7）。
+        说明：data_manager 中 target_ret[t] = log(open[t+2]/open[t+1])，
+        末端 2 个位置（T-2、T-1）被置零（边界），需要裁掉 2 步以避免
+        边界零稀释 IC 估计。
     """
 
     def __init__(
@@ -814,7 +817,7 @@ class EffectivenessEvaluator:
         w_rankic: float = 0.6,
         w_mi: float = 0.4,
         eval_window: int = 250,
-        target_horizon: int = 1,
+        target_horizon: int = 2,
     ) -> None:
         if not (0.0 <= corr_threshold <= 1.0):
             raise ConfigError(

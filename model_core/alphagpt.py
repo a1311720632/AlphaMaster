@@ -108,12 +108,17 @@ class RMSNorm(nn.Module):
 
 
 class QKNorm(nn.Module):
-    """Query-Key Normalization for Attention"""
+    """Query-Key Normalization for Attention.
+
+    【P2-2 死代码警告】：本类定义保留向后兼容，但 LoopedTransformerLayer
+    已不再实例化它（forward 中未调用）。nn.MultiheadAttention 不直接支持
+    QK-Norm 钩子，若未来需要接入需自定义 attention 实现。
+    """
     def __init__(self, d_model, eps=1e-6):
         super().__init__()
         self.eps = eps
         self.scale = nn.Parameter(torch.ones(1, 1, 1, d_model) * (d_model ** -0.5))
-    
+
     def forward(self, q, k):
         # Normalize Q and K independently
         q_norm = F.normalize(q, p=2, dim=-1)
@@ -127,7 +132,7 @@ class SwiGLU(nn.Module):
         super().__init__()
         self.w = nn.Linear(d_in, d_ff * 2)
         self.fc = nn.Linear(d_ff, d_in)
-    
+
     def forward(self, x):
         x_glu = self.w(x)
         x, gate = x_glu.chunk(2, dim=-1)
@@ -136,32 +141,24 @@ class SwiGLU(nn.Module):
 
 
 class MTPHead(nn.Module):
-    """Multi-Task Pooling Head for multi-objective learning"""
+    """Multi-Task Pooling Head.
+
+    【P2-3 简化说明】：原设计含 3 个 task head + router，但 engine.py 未使用
+    task_probs（无辅助 loss 约束 router），导致 multi-task 退化为单 head 加权
+    平均。此处简化为单 head（nn.Linear）以减少参数浪费，forward 仍返回
+    (logits, None) 保持调用方签名兼容。
+    """
     def __init__(self, d_model, vocab_size, num_tasks=3):
         super().__init__()
+        # 简化为单 head：删除 task_heads/task_weights/task_router
+        self.head = nn.Linear(d_model, vocab_size)
+        # 保留 num_tasks 属性供旧代码引用
         self.num_tasks = num_tasks
-        self.task_heads = nn.ModuleList([
-            nn.Linear(d_model, vocab_size) for _ in range(num_tasks)
-        ])
-        self.task_weights = nn.Parameter(torch.ones(num_tasks) / num_tasks)
-        self.task_router = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
-            nn.ReLU(),
-            nn.Linear(d_model // 2, num_tasks)
-        )
-    
+
     def forward(self, x):
-        # Route to appropriate task heads
-        task_logits = self.task_router(x)
-        task_probs = F.softmax(task_logits, dim=-1)
-        
-        # Compute all task outputs
-        task_outputs = [head(x) for head in self.task_heads]
-        task_outputs = torch.stack(task_outputs, dim=1)  # [B, num_tasks, vocab_size]
-        
-        # Weighted combination
-        weighted = (task_probs.unsqueeze(-1) * task_outputs).sum(dim=1)
-        return weighted, task_probs
+        logits = self.head(x)
+        # 返回 (logits, task_probs=None) 保持调用方签名兼容
+        return logits, None
 
 
 class LoopedTransformerLayer(nn.Module):
@@ -171,22 +168,23 @@ class LoopedTransformerLayer(nn.Module):
         self.num_loops = num_loops
         self.d_model = d_model
         self.nhead = nhead
-        
-        # QK-Norm attention
-        self.qk_norm = QKNorm(d_model // nhead)
-        
+
+        # 【P2-2 修复】：移除未使用的 qk_norm 实例（原代码 forward 中从未调用）
+        # 若未来需要 QK-Norm，可在 forward 中接入 QKNorm 类
+        # self.qk_norm = QKNorm(d_model // nhead)
+
         # Standard attention components
         self.attention = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
-        
+
         # RMSNorm instead of LayerNorm
         self.norm1 = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
-        
+
         # SwiGLU FFN instead of standard FFN
         self.ffn = SwiGLU(d_model, dim_feedforward)
-        
+
         self.dropout = nn.Dropout(dropout)
-    
+
     def forward(self, x, mask=None, is_causal=False):
         # Looped processing - recurrent refinement
         for _ in range(self.num_loops):
@@ -194,12 +192,12 @@ class LoopedTransformerLayer(nn.Module):
             x_norm = self.norm1(x)
             attn_out, _ = self.attention(x_norm, x_norm, x_norm, attn_mask=mask, is_causal=is_causal)
             x = x + self.dropout(attn_out)
-            
+
             # FFN with residual
             x_norm = self.norm2(x)
             ffn_out = self.ffn(x_norm)
             x = x + self.dropout(ffn_out)
-        
+
         return x
 
 
@@ -255,10 +253,12 @@ class AlphaGPT(nn.Module):
         
         # RMSNorm instead of LayerNorm
         self.ln_f = RMSNorm(self.d_model)
-        
-        # MTPHead for multi-task output
+
+        # MTPHead for multi-task output（已简化为单 head）
         self.mtp_head = MTPHead(self.d_model, self.vocab_size, num_tasks=3)
-        self.head_critic = nn.Linear(self.d_model, 1)
+        # 【P2-1 修复】：移除未使用的 head_critic（engine.py 三处调用均丢弃 value）
+        # 若未来实现 actor-critic，可重新添加
+        # self.head_critic = nn.Linear(self.d_model, 1)
 
     def forward(self, idx):
         # idx: [Batch, SeqLen]
@@ -269,18 +269,19 @@ class AlphaGPT(nn.Module):
                 f"Increase ModelConfig.MAX_FORMULA_LEN."
             )
         x = self.token_emb(idx) + self.pos_emb[:, :T, :]
-        
+
         # Causal Mask
         mask = nn.Transformer.generate_square_subsequent_mask(T).to(idx.device)
-        
+
         # Process through looped transformer
         x = self.blocks(x, mask=mask, is_causal=True)
         x = self.ln_f(x)
-        
+
         last_emb = x[:, -1, :]
-        
-        # Multi-task pooling head for logits
+
+        # MTPHead 简化为单 head，返回 (logits, None)
         logits, task_probs = self.mtp_head(last_emb)
-        value = self.head_critic(last_emb)
-        
+        # 【P2-1 修复】：value 已废弃，返回 None 保持 3 元组签名兼容调用方
+        value = None
+
         return logits, value, task_probs
