@@ -8,6 +8,21 @@ import random
 import sys
 
 import torch
+
+# ── 并行评估线程配置（必须在第一个张量操作前设置）──────────────────────────
+# torch.set_num_interop_threads 一旦有任何张量 op 就锁定，所以紧跟 import torch。
+# 策略：与 MT5_AlphaGPT 一致——保持 intra_threads=full cores，让 PyTorch 内部
+# 多线程处理大张量；同时开 8 workers 并行评估不同公式。
+# PyTorch 的 intra-op 线程在执行期间会释放 GIL，允许多个 worker 真正并行。
+_PHYS_CORES = os.cpu_count() or 4
+_EVAL_WORKERS = min(_PHYS_CORES, 8)
+_INTRA = _PHYS_CORES  # 保持满线程，不做 phys // workers
+try:
+    torch.set_num_interop_threads(_EVAL_WORKERS)
+except RuntimeError:
+    pass  # 已被锁定
+torch.set_num_threads(_INTRA)
+
 import torch.nn.functional as F
 from torch.distributions import Categorical
 from tqdm import tqdm
@@ -287,23 +302,24 @@ class AlphaEngine:
 
         PyTorch CPU 算子会释放 GIL，多个 worker 线程可以真正并行执行
         vm.execute / bt.evaluate_fold 等纯张量计算。
+
+        线程配置（与 MT5_AlphaGPT 一致）：
+        - intra_threads = physical_cores（保持满，让大张量操作快）
+        - inter_threads = workers（允许多 worker 并行调度）
+        PyTorch 的 intra-op 线程池会自适应负载，不会真的 8×8=64 全跑满。
         """
         from concurrent.futures import ThreadPoolExecutor
-        import os
 
-        phys = os.cpu_count() or 4
+        phys = _PHYS_CORES
         workers = ModelConfig.EVAL_WORKERS
         if workers <= 0:
             workers = min(phys, 8)
         intra = ModelConfig.EVAL_INTRA_THREADS
         if intra <= 0:
-            intra = phys
+            intra = phys  # 保持满线程
+        # 线程已在模块 import 时设置，这里只确认
         try:
             torch.set_num_threads(intra)
-        except RuntimeError:
-            pass
-        try:
-            torch.set_num_interop_threads(1)
         except RuntimeError:
             pass
 
