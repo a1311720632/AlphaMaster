@@ -1852,6 +1852,12 @@ function buildTradeDistChart(series) {
 function renderMonthlyHeatmap(series) {
   const el = $("btMonthlyHeatmap");
   if (!el) return;
+  // 热力图是 HTML grid（按年行数自适应），需覆盖父容器 .equity-chart-wrap.roll 的固定 150px 高度，
+  // 否则会溢出盖到下方的"回测怎么算"说明框。
+  if (el.parentElement) {
+    el.parentElement.style.height = "auto";
+    el.parentElement.style.minHeight = "140px";
+  }
   if (!document.getElementById("hm-style")) {
     const st = document.createElement("style");
     st.id = "hm-style";
