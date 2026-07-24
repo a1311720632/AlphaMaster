@@ -1440,6 +1440,10 @@ function renderPortfolio(report) {
     // ── B2：连赢/连亏 ──────────────────────────────────────────
     { label: "最大连赢", raw: symData?.max_consec_wins ?? null, fmt: "int", cls: "accent" },
     { label: "最大连亏", raw: symData?.max_consec_losses ?? null, fmt: "int", cls: (symData?.max_consec_losses ?? 0) > 10 ? "neg" : "" },
+    // ── C：信号质量 ────────────────────────────────────────────
+    { label: "信息系数IC", raw: symData?.ic ?? null, fmt: "signed", cls: (symData?.ic ?? 0) > 0 ? "accent" : "neg" },
+    { label: "前半Sortino", raw: symData?.sortino_first ?? null, fmt: "signed", cls: "accent" },
+    { label: "后半Sortino", raw: symData?.sortino_second ?? null, fmt: "signed", cls: (symData?.sortino_second ?? 0) > 0 ? "accent" : "neg" },
   ];
 
   // 签名守卫：数值/焦点/资金曲线未变则不重建，避免每次轮询重播动画
@@ -1906,6 +1910,36 @@ function renderMonthlyHeatmap(series) {
   el.innerHTML = html;
 }
 
+function renderWfTable(series) {
+  const el = $("btWfTable");
+  if (!el) return;
+  if (el.parentElement) { el.parentElement.style.height = "auto"; el.parentElement.style.minHeight = "120px"; }
+  if (!document.getElementById("wf-style")) {
+    const st = document.createElement("style");
+    st.id = "wf-style";
+    st.textContent =
+      ".wf-tbl{width:100%;border-collapse:collapse;font-size:12px}" +
+      ".wf-tbl th,.wf-tbl td{padding:5px 8px;text-align:right;border-bottom:1px solid rgba(125,138,163,0.14)}" +
+      ".wf-tbl th{color:#7d8aa3;font-weight:500}" +
+      ".wf-tbl td:nth-child(1),.wf-tbl td:nth-child(2){text-align:left}" +
+      ".wf-tbl .pos{color:#4ade80}.wf-tbl .neg{color:#f87171}.wf-tbl .accent{color:#5eead4}";
+    document.head.appendChild(st);
+  }
+  const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+  const segs = (series.wf_segments || [])
+    .map((s) => ({ fold: Number(s.fold), period: esc(s.period), bars: Number(s.bars), ret: Number(s.return), sharpe: Number(s.sharpe) }))
+    .filter((s) => isFinite(s.fold) && isFinite(s.ret) && isFinite(s.sharpe));
+  if (!segs.length) { el.textContent = ""; el.className = "hm-empty"; el.appendChild(document.createTextNode("无分段数据")); return; }
+  let html = '<table class="wf-tbl"><thead><tr><th>折</th><th>样本外区间</th><th>收益</th><th>Sharpe</th></tr></thead><tbody>';
+  segs.forEach((s) => {
+    const retCls = s.ret >= 0 ? "pos" : "neg";
+    const shCls = s.sharpe >= 1 ? "accent" : (s.sharpe < 0 ? "neg" : "");
+    html += `<tr><td>${s.fold}</td><td>${s.period}</td><td class="${retCls}">${(s.ret * 100).toFixed(1)}%</td><td class="${shCls}">${s.sharpe >= 0 ? "+" : ""}${s.sharpe.toFixed(2)}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
 function renderEquity(resp) {
   const live = $("btEquityLive");
   const empty = $("btEquityEmpty");
@@ -1946,6 +1980,7 @@ function renderEquity(resp) {
   buildDrawdownChart(data.labels, mainSeries);
   buildTradeDistChart(mainSeries);
   renderMonthlyHeatmap(mainSeries);
+  renderWfTable(mainSeries);
 
   if ($("btChartsHint")) {
     $("btChartsHint").textContent = `${mainName} · 交互式资金曲线 · 悬停查看数值`;

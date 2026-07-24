@@ -289,6 +289,7 @@ def export_equity_json(
             "drawdown": _sample(results_map[s]["drawdown"]),   # 水下回撤（≤0）
             "trade_hist": results_map[s]["trade_hist"],         # 单笔盈亏直方图（counts + edges）
             "monthly_returns": results_map[s]["monthly_returns"], # 月度收益（热力图）
+            "wf_segments": results_map[s]["wf_segments"],         # walk-forward 各折样本外表现（分段表）
             "buy_hold": _sample(results_map[s]["buy_hold"]),   # 买入持有基准线（与 equity 同口径：累计对数收益）
             "buy_hold_total": round(float(results_map[s]["buy_hold_total"]), 6),
             "rolling_sharpe": _sample(roll),
@@ -535,6 +536,47 @@ def main():
             for (y, m), v in sorted(_monthly.items())
         ]
 
+        # ── C2：信号质量 ─────────────────────────────────────────────
+        # IC = corr(factor[t], target_ret[t+1])（factor 对下一根收益的预测力，正值=有 alpha）
+        _open = r.open
+        _tret = np.zeros_like(_open, dtype=np.float32)
+        if len(_open) > 2:
+            _tret[: len(_open) - 2] = np.log((_open[2:] + 1e-12) / (_open[1:-1] + 1e-12))
+        _f = r.factor
+        if len(_f) > 10:
+            _x = _f[:-1] - _f[:-1].mean()
+            _y = _tret[1:] - _tret[1:].mean()
+            ic = float((_x * _y).sum() / (np.sqrt((_x ** 2).sum()) * np.sqrt((_y ** 2).sum()) + 1e-12))
+        else:
+            ic = 0.0
+        # 前后两半 Sortino（跨时段一致性，防"只在某段有效"）
+        _half = len(pnl_arr) // 2
+        sortino_first = calc_sortino(pnl_arr[:_half], ppy) if _half > 5 else 0.0
+        sortino_second = calc_sortino(pnl_arr[_half:], ppy) if (len(pnl_arr) - _half) > 5 else 0.0
+
+        # ── C1：walk-forward 分段（每折 val 样本外表现，直查过拟合/各段一致性）────
+        # 复刻 model_core.engine._build_walk_forward_folds 的 val 段切法（rolling window），
+        # 避免为这一个函数导入重型 engine 模块。
+        _T = len(pnl_arr)
+        _nf, _gap, _fsz = 5, 20, _T // 5
+        wf_segments = []
+        if _fsz >= 2 and len(_tarr) and float(_tarr[0]) > 1e9:
+            for _k in range(1, _nf):
+                _vs = _k * _fsz + _gap
+                _ve = min(_vs + _fsz, _T)
+                if _vs >= _T or _ve <= _vs:
+                    break
+                _seg = pnl_arr[_vs:_ve]
+                _ds = datetime.fromtimestamp(int(_tarr[_vs]), tz=timezone.utc).strftime("%Y-%m")
+                _de = datetime.fromtimestamp(int(_tarr[min(_ve - 1, _T - 1)]), tz=timezone.utc).strftime("%Y-%m")
+                wf_segments.append({
+                    "fold": _k,
+                    "period": f"{_ds}~{_de}",
+                    "bars": int(len(_seg)),
+                    "return": round(float(_seg.sum()), 6),
+                    "sharpe": round(float(calc_sharpe(_seg, ppy)), 4),
+                })
+
         results_map[sym] = {
             "pnl":          pnl_arr,
             "cum_pnl":      cum_arr,
@@ -570,6 +612,11 @@ def main():
             "avg_loss":          avg_loss,
             # ── B3：月度收益 ───────────────────────────────────────
             "monthly_returns":   monthly_returns,
+            # ── C：信号质量 + walk-forward 分段 ─────────────────────
+            "ic":                ic,
+            "sortino_first":     sortino_first,
+            "sortino_second":    sortino_second,
+            "wf_segments":       wf_segments,
         }
 
     # ── 5. 打印各品种统计 ─────────────────────────────────────────────
@@ -660,6 +707,10 @@ def main():
             # ── B2：连赢/连亏（供前端卡片）──────────────────────────
             "max_consec_wins":   d["max_consec_wins"],
             "max_consec_losses": d["max_consec_losses"],
+            # ── C：信号质量（供前端卡片）────────────────────────────
+            "ic":             round(d["ic"], 4),
+            "sortino_first":  round(d["sortino_first"], 4),
+            "sortino_second": round(d["sortino_second"], 4),
         }
     if results_map:
         report["portfolio"] = {
