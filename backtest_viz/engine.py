@@ -49,6 +49,7 @@ class SymbolResult:
     position:     np.ndarray     # 连续仓位 ∈ [-1,+1]，[T]
     pnl:          np.ndarray     # 逐 bar PnL，[T]
     cum_pnl:      np.ndarray     # 累计 PnL，[T]
+    buy_hold:     np.ndarray     # 买入持有累计对数收益（恒 +1 仓位基准），[T]
     trades:       list[Trade]    = field(default_factory=list)
     sortino:      float          = 0.0
     total_return: float          = 0.0
@@ -57,6 +58,19 @@ class SymbolResult:
     max_drawdown: float          = 0.0
     avg_hold_bars:float          = 0.0
     profit_loss_ratio: float | None = None  # 盈亏比 = 平均盈利 / 平均亏损
+    # ── A 波扩展指标（风险 / 基准 / 暴露 / 成本 / 尾部）──────────────
+    ann_return:      float = 0.0   # 年化对数收益 = mean(pnl) * periods_per_year
+    calmar:          float = 0.0   # 年化收益 / 最大回撤
+    buy_hold_total:  float = 0.0   # 买入持有累计对数收益（基准）
+    long_pct:        float = 0.0   # 多头时间占比 ∈ [0,1]
+    short_pct:       float = 0.0   # 空头时间占比 ∈ [0,1]
+    flat_pct:        float = 0.0   # 空仓时间占比 ∈ [0,1]
+    avg_position:    float = 0.0   # 平均 |仓位|
+    cost_ratio:      float = 0.0   # 总成本 / |毛收益|
+    avg_turnover:    float = 0.0   # 平均每 bar 换手
+    var95:           float = 0.0   # 95% VaR（正数 = 损失幅度）
+    cvar95:          float = 0.0   # 95% CVaR / 预期短缺
+    worst_bar:       float = 0.0   # 最差单根 bar 收益
 
 
 class BacktestEngine:
@@ -125,9 +139,13 @@ class BacktestEngine:
 
         # numpy 转换（便于后续图表处理）
         factor_np   = factor_1d.detach().float().numpy()
-        # 连续仓位模式：tanh 直接作为仓位比例，与训练 backtest.py 完全一致
         signal_np   = np.tanh(factor_np)
-        position_np = signal_np
+        # 连续仓位：与训练 / 实盘严格 parity——走 strategy_manager.signal 的同一个函数，
+        # 内部做 tanh + MIN_TRADE_EXPOSURE 地板（|pos|<0.05 → 空仓）。
+        # 修复原先「只 tanh、不地板」的偏差：弱信号此前会被当成微小仓位计入回测，
+        # 与训练 backtest.py / 实盘 runner 的信号逻辑不一致。
+        from strategy_manager.signal import compute_target_positions_stateless as _to_positions
+        position_np = _to_positions(factor_1d).detach().float().numpy()
 
         open_np   = raw_dict["open"].float().numpy()
         high_np   = raw_dict["high"].float().numpy()
@@ -177,6 +195,47 @@ class BacktestEngine:
         )
         pl_ratio      = self._calc_profit_loss_ratio(trades)
 
+        # ── A 波扩展指标 ─────────────────────────────────────────────
+        # 最大回撤（基于复利净值 equity = exp(cum_pnl)，修复原 max_drawdown=0.0 stub）
+        if len(cum_pnl):
+            equity      = np.exp(cum_pnl)
+            running_max = np.maximum.accumulate(equity)
+            dd          = (running_max - equity) / np.where(running_max <= 0, 1e-12, running_max)
+            max_drawdown = float(np.clip(np.max(dd), 0.0, 1.0))
+        else:
+            max_drawdown = 0.0
+
+        ann_ret = float(pnl_np.mean() * self.periods_per_year) if len(pnl_np) else 0.0
+        calmar  = float(ann_ret / max_drawdown) if max_drawdown > 1e-9 else 0.0
+
+        # 买入持有基准：恒 +1 仓位、无换手成本
+        bh_cum         = np.cumsum(target_ret) if len(target_ret) else np.zeros_like(cum_pnl)
+        buy_hold_total = float(bh_cum[-1]) if len(bh_cum) else 0.0
+
+        # 多空 / 空仓时间占比 + 平均仓位
+        _eps = 1e-6
+        _n   = len(position_np)
+        long_pct  = float(np.mean(position_np >  _eps)) if _n else 0.0
+        short_pct = float(np.mean(position_np < -_eps)) if _n else 0.0
+        flat_pct  = float(np.mean(np.abs(position_np) <= _eps)) if _n else 0.0
+        avg_pos   = float(np.mean(np.abs(position_np))) if _n else 0.0
+
+        # 成本占比 + 平均换手
+        gross_ret  = float(np.sum(position_np * target_ret)) if _n else 0.0
+        total_cost = float(np.sum(turnover * self.cost_rate)) if len(turnover) else 0.0
+        cost_ratio = float(total_cost / abs(gross_ret)) if abs(gross_ret) > 1e-9 else 0.0
+        avg_turn   = float(np.mean(turnover)) if len(turnover) else 0.0
+
+        # 尾部风险（逐 bar pnl 分布）
+        if len(pnl_np):
+            q5        = float(np.percentile(pnl_np, 5))
+            var95     = -q5
+            tail      = pnl_np[pnl_np <= q5]
+            cvar95    = float(-tail.mean()) if len(tail) else var95
+            worst_bar = float(np.min(pnl_np))
+        else:
+            var95 = cvar95 = worst_bar = 0.0
+
         return SymbolResult(
             symbol       = symbol,
             times        = times_np,
@@ -190,14 +249,27 @@ class BacktestEngine:
             position     = position_np,
             pnl          = pnl_np,
             cum_pnl      = cum_pnl,
+            buy_hold     = bh_cum,
             trades       = trades,
             sortino      = sortino,
             total_return = total_return,
             n_trades     = n_trades,
             win_rate     = win_rate,
-            max_drawdown = 0.0,
+            max_drawdown = max_drawdown,
             avg_hold_bars= avg_hold,
             profit_loss_ratio = pl_ratio,
+            ann_return      = ann_ret,
+            calmar          = calmar,
+            buy_hold_total  = buy_hold_total,
+            long_pct        = long_pct,
+            short_pct       = short_pct,
+            flat_pct        = flat_pct,
+            avg_position    = avg_pos,
+            cost_ratio      = cost_ratio,
+            avg_turnover    = avg_turn,
+            var95           = var95,
+            cvar95          = cvar95,
+            worst_bar       = worst_bar,
         )
 
     # ─────────────────────────────────────────────────────────────────────

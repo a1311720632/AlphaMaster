@@ -286,6 +286,8 @@ def export_equity_json(
         pl = results_map[s].get("profit_loss_ratio")
         out["symbols"][s] = {
             "equity": _sample(cum),
+            "buy_hold": _sample(results_map[s]["buy_hold"]),   # 买入持有基准线（与 equity 同口径：累计对数收益）
+            "buy_hold_total": round(float(results_map[s]["buy_hold_total"]), 6),
             "rolling_sharpe": _sample(roll),
             "sharpe": round(float(results_map[s]["sharpe"]), 4),
             "sortino": round(float(results_map[s]["sortino"]), 4),
@@ -482,6 +484,7 @@ def main():
         results_map[sym] = {
             "pnl":          pnl_arr,
             "cum_pnl":      cum_arr,
+            "buy_hold":     r.buy_hold,        # 买入持有累计对数收益序列（图表基准线）
             "total_return": r.total_return,
             "sharpe":       sharpe,
             "sortino":      sortino,
@@ -490,6 +493,20 @@ def main():
             "avg_hold":     r.avg_hold_bars,
             "profit_loss_ratio": pl_ratio,
             "cost_rate":    cost_rate,
+            # ── A 波扩展指标 ───────────────────────────────────────
+            "max_drawdown":  r.max_drawdown,
+            "ann_return":    r.ann_return,
+            "calmar":        r.calmar,
+            "buy_hold_total": r.buy_hold_total,
+            "long_pct":      r.long_pct,
+            "short_pct":     r.short_pct,
+            "flat_pct":      r.flat_pct,
+            "avg_position":  r.avg_position,
+            "cost_ratio":    r.cost_ratio,
+            "avg_turnover":  r.avg_turnover,
+            "var95":         r.var95,
+            "cvar95":        r.cvar95,
+            "worst_bar":     r.worst_bar,
         }
 
     # ── 5. 打印各品种统计 ─────────────────────────────────────────────
@@ -563,6 +580,20 @@ def main():
             "win_rate":     round(d["win_rate"], 4),
             "avg_hold_bars":round(d["avg_hold"], 2),
             "profit_loss_ratio": round(pl, 4) if pl is not None else None,
+            # ── A 波扩展指标（供前端绩效卡）─────────────────────────
+            "max_drawdown":  round(d["max_drawdown"], 4),
+            "ann_return":    round(d["ann_return"], 4),
+            "calmar":        round(d["calmar"], 4),
+            "buy_hold_total": round(d["buy_hold_total"], 6),
+            "long_pct":      round(d["long_pct"], 4),
+            "short_pct":     round(d["short_pct"], 4),
+            "flat_pct":      round(d["flat_pct"], 4),
+            "avg_position":  round(d["avg_position"], 4),
+            "cost_ratio":    round(d["cost_ratio"], 4),
+            "avg_turnover":  round(d["avg_turnover"], 6),
+            "var95":         round(d["var95"], 6),
+            "cvar95":        round(d["cvar95"], 6),
+            "worst_bar":     round(d["worst_bar"], 6),
         }
     if results_map:
         report["portfolio"] = {

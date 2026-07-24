@@ -1322,6 +1322,7 @@ const METRIC_FMT = {
   ratio: (v) => v.toFixed(3),
   int: (v) => Math.round(v).toLocaleString(),
   winrate: (v) => (v * 100).toFixed(1) + "%",
+  dd: (v) => (v * 100).toFixed(1) + "%", // 无符号百分比（回撤 / 占比）
   strength: (v) => Math.round(v * 100) + "%",
 };
 
@@ -1430,6 +1431,12 @@ function renderPortfolio(report) {
     { label: "盈亏比", raw: Number.isFinite(plNum) ? plNum : null, fmt: "ratio", cls: Number.isFinite(plNum) ? "accent" : "" },
     { label: "交易数", raw: Number.isFinite(Number(nTrades)) ? Number(nTrades) : null, fmt: "int", cls: "" },
     { label: "胜率", raw: winRate != null ? Number(winRate) : null, fmt: "winrate", cls: "" },
+    // ── A 波扩展：风险 / 基准 / 暴露 / 成本 ──────────────────────
+    { label: "最大回撤", raw: symData?.max_drawdown ?? null, fmt: "dd", cls: (symData?.max_drawdown ?? 0) > 0.2 ? "neg" : "" },
+    { label: "Calmar", raw: symData?.calmar ?? null, fmt: "ratio", cls: "accent" },
+    { label: "买入持有", raw: symData?.buy_hold_total ?? null, fmt: "pct", cls: (symData?.buy_hold_total ?? 0) >= 0 ? "pos" : "neg" },
+    { label: "多头占比", raw: symData?.long_pct ?? null, fmt: "winrate", cls: "" },
+    { label: "成本占比", raw: symData?.cost_ratio ?? null, fmt: "dd", cls: (symData?.cost_ratio ?? 0) > 0.3 ? "neg" : "" },
   ];
 
   // 签名守卫：数值/焦点/资金曲线未变则不重建，避免每次轮询重播动画
@@ -1673,6 +1680,25 @@ function buildEquityChart(labels, symbols, portfolio) {
       backgroundColor: (ctx) => verticalGradient(ctx.chart, col.rgb, 0.3, 0),
     };
   });
+  // ── A 波：单品种叠加买入持有基准线（虚线；与 equity 同口径 = 累计对数收益）
+  if (!multi) {
+    const bh = symbols[symNames[0]] && symbols[symNames[0]].buy_hold;
+    if (bh) {
+      datasets.push({
+        label: "买入持有 (Buy & Hold)",
+        data: bh,
+        borderColor: "#94a3b8",
+        borderWidth: 1.6,
+        borderDash: [5, 4],
+        tension: 0.25,
+        pointRadius: 0,
+        pointHoverRadius: 3,
+        pointHoverBackgroundColor: "#94a3b8",
+        pointHoverBorderColor: "#05070d",
+        fill: false,
+      });
+    }
+  }
   if (portfolio) {
     datasets.push({
       label: "等权组合",
