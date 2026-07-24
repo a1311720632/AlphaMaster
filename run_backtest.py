@@ -487,7 +487,21 @@ def main():
         # ── B2：单笔盈亏分布 + 连赢/连亏（trades 已按时间顺序）─────────
         trade_pnls = np.array([t.pnl for t in r.trades], dtype=float) if r.trades else np.array([], dtype=float)
         if trade_pnls.size:
-            _counts, _edges = np.histogram(trade_pnls, bins=20)
+            _lo, _hi = float(trade_pnls.min()), float(trade_pnls.max())
+            _w = (_hi - _lo) / 20.0 if _hi > _lo else 1.0
+            # 让 0 落在 bin 边界上（负侧/正侧各自等分）→ 每根柱子要么纯赢要么纯亏。
+            # 否则跨 0 的柱子会被 bin 中心微正/微负误染单色，与真实胜率矛盾。
+            _nneg = max(1, int(np.ceil((-_lo) / _w))) if _lo < 0 else 0
+            _npos = max(1, int(np.ceil(_hi / _w))) if _hi > 0 else 0
+            if _nneg and _npos:
+                _edges = np.concatenate([
+                    np.linspace(-_nneg * _w, 0.0, _nneg + 1),
+                    np.linspace(0.0, _npos * _w, _npos + 1)[1:],
+                ])
+            else:
+                _edges = np.linspace(_lo, _hi, 21)
+            _edges = np.round(_edges, 6)
+            _counts, _edges = np.histogram(trade_pnls, bins=_edges)
             trade_hist = {"counts": _counts.tolist(),
                           "edges": [round(float(e), 6) for e in _edges]}
             max_cw = max_cl = cur_cw = cur_cl = 0
