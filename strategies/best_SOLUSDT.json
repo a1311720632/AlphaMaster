@@ -1,0 +1,19 @@
+{
+  "vocab_version": "v9217a2c0d91a",
+  "symbol": "SOLUSDT",
+  "formula": [
+    56,
+    55,
+    98,
+    58,
+    55,
+    5,
+    72,
+    126
+  ],
+  "best_score": 3.0749502182006836,
+  "formula_decoded": "SAR_DIST → SUPERTREND_DIR → TS_MAX_20 → ROLL_KURT_20 → SUPERTREND_DIR → ATR → GATE → IF_GT",
+  "train_step": 0,
+  "timeframe": "H1",
+  "mode": "parquet_file"
+}

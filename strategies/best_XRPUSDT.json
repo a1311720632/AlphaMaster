@@ -1,0 +1,19 @@
+{
+  "vocab_version": "v9217a2c0d91a",
+  "symbol": "XRPUSDT",
+  "formula": [
+    3,
+    78,
+    88,
+    120,
+    22,
+    94,
+    115,
+    122
+  ],
+  "best_score": 2.191534996032715,
+  "formula_decoded": "MA_DIFF → TS_MEAN_10 → MOMENTUM_10 → TS_ZSCORE_10 → BOLL_WIDTH → EMA_20 → MIN → WINSORIZE",
+  "train_step": 280,
+  "timeframe": "H1",
+  "mode": "parquet_file"
+}
