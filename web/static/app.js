@@ -1921,7 +1921,7 @@ function renderWfTable(series) {
       ".wf-tbl{width:100%;border-collapse:collapse;font-size:12px}" +
       ".wf-tbl th,.wf-tbl td{padding:5px 8px;text-align:right;border-bottom:1px solid rgba(125,138,163,0.14)}" +
       ".wf-tbl th{color:#7d8aa3;font-weight:500}" +
-      ".wf-tbl td:nth-child(1),.wf-tbl td:nth-child(2){text-align:left}" +
+      ".wf-tbl td:nth-child(1),.wf-tbl td:nth-child(2),.wf-tbl th:nth-child(1),.wf-tbl th:nth-child(2){text-align:left}" +
       ".wf-tbl .pos{color:#4ade80}.wf-tbl .neg{color:#f87171}.wf-tbl .accent{color:#5eead4}";
     document.head.appendChild(st);
   }
