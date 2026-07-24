@@ -50,6 +50,7 @@ class SymbolResult:
     pnl:          np.ndarray     # 逐 bar PnL，[T]
     cum_pnl:      np.ndarray     # 累计 PnL，[T]
     buy_hold:     np.ndarray     # 买入持有累计对数收益（恒 +1 仓位基准），[T]
+    drawdown:     np.ndarray     # 水下回撤序列 equity/running_max - 1（≤0），[T]
     trades:       list[Trade]    = field(default_factory=list)
     sortino:      float          = 0.0
     total_return: float          = 0.0
@@ -196,14 +197,17 @@ class BacktestEngine:
         pl_ratio      = self._calc_profit_loss_ratio(trades)
 
         # ── A 波扩展指标 ─────────────────────────────────────────────
-        # 最大回撤（基于复利净值 equity = exp(cum_pnl)，修复原 max_drawdown=0.0 stub）
+        # 最大回撤 + 水下曲线（基于复利净值 equity = exp(cum_pnl)，修复原 max_drawdown=0.0 stub）
         if len(cum_pnl):
             equity      = np.exp(cum_pnl)
             running_max = np.maximum.accumulate(equity)
-            dd          = (running_max - equity) / np.where(running_max <= 0, 1e-12, running_max)
+            safe_peak   = np.where(running_max <= 0, 1e-12, running_max)
+            dd          = (running_max - equity) / safe_peak     # 回撤幅度 ∈ [0,1]
             max_drawdown = float(np.clip(np.max(dd), 0.0, 1.0))
+            drawdown_np = (equity / safe_peak) - 1.0             # 水下曲线 ≤ 0
         else:
             max_drawdown = 0.0
+            drawdown_np = np.zeros_like(cum_pnl)
 
         ann_ret = float(pnl_np.mean() * self.periods_per_year) if len(pnl_np) else 0.0
         calmar  = float(ann_ret / max_drawdown) if max_drawdown > 1e-9 else 0.0
@@ -250,6 +254,7 @@ class BacktestEngine:
             pnl          = pnl_np,
             cum_pnl      = cum_pnl,
             buy_hold     = bh_cum,
+            drawdown     = drawdown_np,
             trades       = trades,
             sortino      = sortino,
             total_return = total_return,

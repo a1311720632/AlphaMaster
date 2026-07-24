@@ -365,6 +365,24 @@
               <canvas id="btRollingChart"></canvas>
             </div>
           </div>
+          <div class="equity-chart-block roll">
+            <div class="equity-axis-label">水下回撤 · Drawdown（≤0，越深越糟）</div>
+            <div class="equity-chart-wrap roll">
+              <canvas id="btDrawdownChart"></canvas>
+            </div>
+          </div>
+          <div class="equity-chart-block roll">
+            <div class="equity-axis-label">单笔盈亏分布（绿=赚 / 红=亏）</div>
+            <div class="equity-chart-wrap roll">
+              <canvas id="btTradeDistChart"></canvas>
+            </div>
+          </div>
+          <div class="equity-chart-block roll">
+            <div class="equity-axis-label">月度收益热力图（绿=赚 / 红=亏，深浅=幅度，末列=全年）</div>
+            <div class="equity-chart-wrap roll">
+              <div id="btMonthlyHeatmap" class="monthly-heatmap"></div>
+            </div>
+          </div>
         </div>
 
         <div class="metric-empty" id="btEquityEmpty">回测完成后展示资金曲线</div>
@@ -567,6 +585,6 @@
   </div>
 
   <script src="/static/bg.js?v=1"></script>
-  <script src="/static/app.js?v=61"></script>
+  <script src="/static/app.js?v=63"></script>
 </body>
 </html>

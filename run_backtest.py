@@ -286,6 +286,9 @@ def export_equity_json(
         pl = results_map[s].get("profit_loss_ratio")
         out["symbols"][s] = {
             "equity": _sample(cum),
+            "drawdown": _sample(results_map[s]["drawdown"]),   # 水下回撤（≤0）
+            "trade_hist": results_map[s]["trade_hist"],         # 单笔盈亏直方图（counts + edges）
+            "monthly_returns": results_map[s]["monthly_returns"], # 月度收益（热力图）
             "buy_hold": _sample(results_map[s]["buy_hold"]),   # 买入持有基准线（与 equity 同口径：累计对数收益）
             "buy_hold_total": round(float(results_map[s]["buy_hold_total"]), 6),
             "rolling_sharpe": _sample(roll),
@@ -481,10 +484,48 @@ def main():
         sortino = calc_sortino(pnl_arr, ppy)
         pl_ratio = r.profit_loss_ratio
 
+        # ── B2：单笔盈亏分布 + 连赢/连亏（trades 已按时间顺序）─────────
+        trade_pnls = np.array([t.pnl for t in r.trades], dtype=float) if r.trades else np.array([], dtype=float)
+        if trade_pnls.size:
+            _counts, _edges = np.histogram(trade_pnls, bins=20)
+            trade_hist = {"counts": _counts.tolist(),
+                          "edges": [round(float(e), 6) for e in _edges]}
+            max_cw = max_cl = cur_cw = cur_cl = 0
+            for p in trade_pnls:
+                if p > 0:
+                    cur_cw += 1; cur_cl = 0; max_cw = max(max_cw, cur_cw)
+                elif p < 0:
+                    cur_cl += 1; cur_cw = 0; max_cl = max(max_cl, cur_cl)
+                else:
+                    cur_cw = cur_cl = 0
+            _wins = trade_pnls[trade_pnls > 0]
+            _loss = trade_pnls[trade_pnls < 0]
+            avg_win  = float(_wins.mean()) if _wins.size else 0.0
+            avg_loss = float(_loss.mean()) if _loss.size else 0.0
+        else:
+            trade_hist = {"counts": [], "edges": []}
+            max_cw = max_cl = avg_win = avg_loss = 0
+
+        # ── B3：月度收益聚合（供热力图；按 UTC 年-月 累加逐 bar pnl）────────
+        from collections import defaultdict
+        from datetime import datetime, timezone
+        _monthly = defaultdict(float)
+        _tarr = r.times
+        if len(_tarr) and float(_tarr[0]) > 1e9:  # 真实时间戳（非 np.arange 兜底）
+            _pnl = r.pnl
+            for i in range(len(_pnl)):
+                _dt = datetime.fromtimestamp(int(_tarr[i]), tz=timezone.utc)
+                _monthly[(_dt.year, _dt.month)] += float(_pnl[i])
+        monthly_returns = [
+            {"year": y, "month": m, "ret": round(v, 6)}
+            for (y, m), v in sorted(_monthly.items())
+        ]
+
         results_map[sym] = {
             "pnl":          pnl_arr,
             "cum_pnl":      cum_arr,
             "buy_hold":     r.buy_hold,        # 买入持有累计对数收益序列（图表基准线）
+            "drawdown":     r.drawdown,        # 水下回撤序列（≤0，副图用）
             "total_return": r.total_return,
             "sharpe":       sharpe,
             "sortino":      sortino,
@@ -507,6 +548,14 @@ def main():
             "var95":         r.var95,
             "cvar95":        r.cvar95,
             "worst_bar":     r.worst_bar,
+            # ── B2：单笔盈亏分布 + 连赢/连亏 ────────────────────────
+            "trade_hist":        trade_hist,
+            "max_consec_wins":   max_cw,
+            "max_consec_losses": max_cl,
+            "avg_win":           avg_win,
+            "avg_loss":          avg_loss,
+            # ── B3：月度收益 ───────────────────────────────────────
+            "monthly_returns":   monthly_returns,
         }
 
     # ── 5. 打印各品种统计 ─────────────────────────────────────────────
@@ -594,6 +643,9 @@ def main():
             "var95":         round(d["var95"], 6),
             "cvar95":        round(d["cvar95"], 6),
             "worst_bar":     round(d["worst_bar"], 6),
+            # ── B2：连赢/连亏（供前端卡片）──────────────────────────
+            "max_consec_wins":   d["max_consec_wins"],
+            "max_consec_losses": d["max_consec_losses"],
         }
     if results_map:
         report["portfolio"] = {

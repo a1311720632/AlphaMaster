@@ -1437,6 +1437,9 @@ function renderPortfolio(report) {
     { label: "买入持有", raw: symData?.buy_hold_total ?? null, fmt: "pct", cls: (symData?.buy_hold_total ?? 0) >= 0 ? "pos" : "neg" },
     { label: "多头占比", raw: symData?.long_pct ?? null, fmt: "winrate", cls: "" },
     { label: "成本占比", raw: symData?.cost_ratio ?? null, fmt: "dd", cls: (symData?.cost_ratio ?? 0) > 0.3 ? "neg" : "" },
+    // ── B2：连赢/连亏 ──────────────────────────────────────────
+    { label: "最大连赢", raw: symData?.max_consec_wins ?? null, fmt: "int", cls: "accent" },
+    { label: "最大连亏", raw: symData?.max_consec_losses ?? null, fmt: "int", cls: (symData?.max_consec_losses ?? 0) > 10 ? "neg" : "" },
   ];
 
   // 签名守卫：数值/焦点/资金曲线未变则不重建，避免每次轮询重播动画
@@ -1503,6 +1506,8 @@ function renderBacktestTable(symbols) {
 // ═══════════════════════════════════════════════════════════════════
 let equityChart = null;
 let rollingChart = null;
+let drawdownChart = null;
+let tradeDistChart = null;
 let btEquitySig = "";
 
 const EQUITY_COLORS = [
@@ -1613,6 +1618,8 @@ const ROLLING_OPTIONS = {
 function destroyEquityCharts() {
   if (equityChart) { equityChart.destroy(); equityChart = null; }
   if (rollingChart) { rollingChart.destroy(); rollingChart = null; }
+  if (drawdownChart) { drawdownChart.destroy(); drawdownChart = null; }
+  if (tradeDistChart) { tradeDistChart.destroy(); tradeDistChart = null; }
 }
 
 function renderEquityStats(name, series) {
@@ -1761,6 +1768,138 @@ function buildRollingChart(labels, series, windowBars) {
   });
 }
 
+function buildDrawdownChart(labels, series) {
+  const canvas = $("btDrawdownChart");
+  if (!canvas) return;
+  if (drawdownChart) drawdownChart.destroy();
+  const data = series.drawdown || [];
+  const vals = data.filter((v) => v != null);
+  const ddMin = vals.length ? Math.min(...vals) : -1;
+  drawdownChart = new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "水下回撤",
+          data,
+          borderColor: "#f87171",
+          borderWidth: 1.4,
+          tension: 0.2,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointHoverBackgroundColor: "#f87171",
+          pointHoverBorderColor: "#05070d",
+          fill: true,
+          backgroundColor: "rgba(248, 113, 113, 0.18)",
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => "回撤 " + (ctx.parsed.y * 100).toFixed(2) + "%" } },
+      },
+      scales: {
+        x: { display: false },
+        y: {
+          suggestedMax: 0,
+          suggestedMin: ddMin * 1.1,
+          ticks: { color: "#7d8aa3", callback: (v) => (v * 100).toFixed(0) + "%" },
+          grid: { color: "rgba(125,138,163,0.12)" },
+        },
+      },
+    },
+  });
+}
+
+function buildTradeDistChart(series) {
+  const canvas = $("btTradeDistChart");
+  if (!canvas) return;
+  if (tradeDistChart) tradeDistChart.destroy();
+  const th = series.trade_hist || {};
+  const counts = th.counts || [];
+  const edges = th.edges || [];
+  const n = counts.length;
+  const labels = [];
+  const colors = [];
+  for (let i = 0; i < n; i++) {
+    const center = (edges[i] + edges[i + 1]) / 2;
+    labels.push((center * 100).toFixed(2) + "%");
+    colors.push(center >= 0 ? "rgba(74,222,128,0.55)" : "rgba(248,113,113,0.55)");
+  }
+  tradeDistChart = new Chart(canvas.getContext("2d"), {
+    type: "bar",
+    data: { labels, datasets: [{ label: "交易数", data: counts, backgroundColor: colors, borderColor: colors, borderWidth: 0 }] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { title: (items) => "单笔收益 " + items[0].label, label: (ctx) => ctx.parsed.y + " 笔" } },
+      },
+      scales: {
+        x: { ticks: { color: "#7d8aa3", maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } },
+        y: { beginAtZero: true, ticks: { color: "#7d8aa3" }, grid: { color: "rgba(125,138,163,0.12)" } },
+      },
+    },
+  });
+}
+
+function renderMonthlyHeatmap(series) {
+  const el = $("btMonthlyHeatmap");
+  if (!el) return;
+  if (!document.getElementById("hm-style")) {
+    const st = document.createElement("style");
+    st.id = "hm-style";
+    st.textContent =
+      ".hm-row{display:flex;gap:2px;margin-bottom:2px}" +
+      ".hm-cell{width:40px;height:24px;display:flex;align-items:center;justify-content:center;font-size:8.5px;color:#dbe3f1;border-radius:3px}" +
+      ".hm-yl{width:44px;color:#9aa6bd;font-size:10px;justify-content:flex-start;padding-left:2px}" +
+      ".hm-mh{color:#7d8aa3;font-size:9px}" +
+      ".hm-yr{width:50px;font-weight:600;color:#e8edf4}" +
+      ".hm-empty{color:#3a465e}";
+    document.head.appendChild(st);
+  }
+  // 仅接受数值字段（year/month/ret），非数值一律丢弃 —— 防 innerHTML 注入
+  const rows = (series.monthly_returns || [])
+    .map((r) => ({ year: Number(r.year), month: Number(r.month), ret: Number(r.ret) }))
+    .filter((r) => isFinite(r.year) && isFinite(r.month) && isFinite(r.ret));
+  if (!rows.length) { el.textContent = ""; el.className = "hm-empty"; el.appendChild(document.createTextNode("无月度数据")); return; }
+  const map = {};
+  let maxAbs = 0;
+  rows.forEach((r) => {
+    map[r.year + "_" + r.month] = r.ret;
+    if (Math.abs(r.ret) > maxAbs) maxAbs = Math.abs(r.ret);
+  });
+  const years = [...new Set(rows.map((r) => r.year))].sort((a, b) => a - b);
+  const yearTotals = {};
+  rows.forEach((r) => { yearTotals[r.year] = (yearTotals[r.year] || 0) + r.ret; });
+  const colorFor = (ret) => {
+    if (ret == null || !isFinite(ret)) return "#1a2233";
+    const intensity = 0.15 + (Math.abs(ret) / (maxAbs || 1)) * 0.7;
+    return ret >= 0 ? `rgba(74,222,128,${intensity.toFixed(3)})` : `rgba(248,113,113,${intensity.toFixed(3)})`;
+  };
+  let html = '<div class="hm-row"><span class="hm-cell hm-yl">年＼月</span>';
+  for (let m = 1; m <= 12; m++) html += `<span class="hm-cell hm-mh">${m}</span>`;
+  html += '<span class="hm-cell hm-mh">全年</span></div>';
+  years.forEach((y) => {
+    html += `<div class="hm-row"><span class="hm-cell hm-yl">${y}</span>`;
+    for (let m = 1; m <= 12; m++) {
+      const ret = map[y + "_" + m];
+      const has = ret != null && isFinite(ret);
+      html += `<span class="hm-cell" style="background:${colorFor(has ? ret : null)}" title="${y}年${m}月 ${has ? (ret * 100).toFixed(2) + "%" : "无数据"}">${has ? (ret * 100).toFixed(1) : ""}</span>`;
+    }
+    const yt = yearTotals[y];
+    html += `<span class="hm-cell hm-yr" style="background:${colorFor(yt)}">${(yt * 100).toFixed(0)}</span>`;
+    html += "</div>";
+  });
+  el.innerHTML = html;
+}
+
 function renderEquity(resp) {
   const live = $("btEquityLive");
   const empty = $("btEquityEmpty");
@@ -1798,6 +1937,9 @@ function renderEquity(resp) {
   renderEquityStats(mainName, mainSeries);
   buildEquityChart(data.labels, symbols, portfolio);
   buildRollingChart(data.labels, mainSeries, data.rolling_window);
+  buildDrawdownChart(data.labels, mainSeries);
+  buildTradeDistChart(mainSeries);
+  renderMonthlyHeatmap(mainSeries);
 
   if ($("btChartsHint")) {
     $("btChartsHint").textContent = `${mainName} · 交互式资金曲线 · 悬停查看数值`;
