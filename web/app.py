@@ -48,6 +48,7 @@ from web.training_time import get_training_time_summary
 from web.training_package import build_training_export_zip, import_training_package
 from web.backtest_manager import backtest_manager
 from web.realtime_manager import realtime_manager
+from web.autopilot_manager import autopilot_manager
 from web.data_sources.factory import list_sources
 from strategy_manager.live_signal import min_exposure
 
@@ -97,6 +98,13 @@ class StartBacktestRequest(BaseModel):
     strategy_file: str
     commission_pct: float | None = None
     slippage_pct: float | None = None
+
+
+class StartAutopilotRequest(BaseModel):
+    strategy_file: str
+    mode: str = "paper"  # paper / testnet / live
+    symbol: str | None = None
+    timeframe: str | None = None
 
 
 class AddWatchRequest(BaseModel):
@@ -1098,6 +1106,58 @@ def api_realtime_feishu_test(req: FeishuTestRequest) -> dict[str, Any]:
     if not ok:
         raise HTTPException(400, msg)
     return {"ok": True, "message": msg}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 自动驾驶 API（第四步：paper / testnet / live）
+# ─────────────────────────────────────────────────────────────────────
+def _autopilot_state_dict() -> dict[str, Any]:
+    """读 autopilot_state.json，回传最新账本条目（target/actual/equity/dd）给前端。"""
+    try:
+        from config import Config
+        from autopilot.state import AutopilotState
+
+        st = AutopilotState.load(Config.AUTOPILOT_STATE_FILE)
+        if not st:
+            return {}
+        out = st.to_dict()
+        out["last_bar"] = st.history[-1] if st.history else None
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)}
+
+
+@app.get("/api/autopilot/status")
+def api_autopilot_status() -> dict[str, Any]:
+    status = autopilot_manager.status()
+    status["log_tail"] = autopilot_manager.tail_log(150)
+    status["state"] = _autopilot_state_dict()
+    return status
+
+
+@app.post("/api/autopilot/start")
+def api_autopilot_start(req: StartAutopilotRequest) -> dict[str, Any]:
+    sf = resolve_strategy_file(req.strategy_file) if req.strategy_file else ""
+    if not sf:
+        raise HTTPException(400, "缺少 strategy_file")
+    save_settings({"autopilot_mode": req.mode, "autopilot_last_strategy": sf,
+                   "autopilot_symbol": req.symbol or "", "autopilot_timeframe": req.timeframe or ""})
+    try:
+        job = autopilot_manager.start(
+            strategy_file=sf,
+            mode=req.mode,
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+        )
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(409, str(e)) from e
+    return {"ok": True, "job": job.to_dict()}
+
+
+@app.post("/api/autopilot/stop")
+def api_autopilot_stop() -> dict[str, Any]:
+    stopped = autopilot_manager.stop()
+    return {"ok": stopped, "autopilot": autopilot_manager.status()}
 
 
 @app.get("/")

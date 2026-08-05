@@ -65,6 +65,14 @@
           <span class="step-sub">信号雷达 · 多品种并发</span>
         </span>
       </button>
+      <span class="step-link"></span>
+      <button type="button" class="step" data-page="autopilot">
+        <span class="step-index">04</span>
+        <span class="step-body">
+          <span class="step-title">自动驾驶</span>
+          <span class="step-sub">paper · testnet · live</span>
+        </span>
+      </button>
     </nav>
 
     <!-- ══════════════ 步骤一：训练页 ══════════════ -->
@@ -524,6 +532,71 @@
       </section>
     </div><!-- /page-realtime -->
 
+    <!-- ══════════════ 步骤四：自动驾驶页 ══════════════ -->
+    <div class="page" id="page-autopilot">
+    <section class="panel launch-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <h2>自动驾驶（第四步）</h2>
+      <div class="launch-form launch-form-file">
+        <div class="launch-row launch-row-main">
+          <button type="button" class="btn btn-secondary btn-browse" id="apBrowseStrategyBtn">选择策略</button>
+          <div class="data-file-card" id="apStrategyCard">
+            <div class="data-file-empty">尚未选择策略文件（第一步挖出的 best_*.json）</div>
+          </div>
+        </div>
+        <div class="launch-row" style="gap:12px;flex-wrap:wrap;align-items:center;">
+          <label class="field-inline">模式
+            <select id="apMode">
+              <option value="paper">paper · 不下单（回测核心吃实时 bar）</option>
+              <option value="testnet">testnet · OKX 模拟盘（假币）</option>
+              <option value="live">live · 真实资金</option>
+            </select>
+          </label>
+          <label class="field-inline">品种
+            <input type="text" id="apSymbol" placeholder="留空用策略里的（如 BTCUSDT）" />
+          </label>
+          <label class="field-inline">周期
+            <input type="text" id="apTimeframe" placeholder="留空用策略里的（如 1h）" />
+          </label>
+        </div>
+        <div class="launch-actions" role="group" aria-label="自动驾驶操作">
+          <button class="btn btn-primary" id="apStartBtn" disabled>启动</button>
+          <button class="btn btn-danger" id="apStopBtn" disabled>停止</button>
+        </div>
+        <small class="field-hint">连续仓位·对齐回测（无单笔止盈止损）；testnet/live 需 <code>ccxt</code> + OKX 凭据（见 <code>.env</code>）。停机靠账户级回撤/断网熔断。</small>
+      </div>
+    </section>
+
+    <div class="split">
+      <section class="panel chart-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <div class="panel-head">
+          <h2>实时状态</h2>
+          <span class="hint" id="apStatusHint">未启动</span>
+        </div>
+        <div id="apMetrics" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px 16px;font-size:13px;">
+          <div><span style="opacity:.7">模式</span><br><b id="apStatMode">—</b></div>
+          <div><span style="opacity:.7">品种/周期</span><br><b id="apStatSym">—</b></div>
+          <div><span style="opacity:.7">目标仓位</span><br><b id="apStatPos">—</b></div>
+          <div><span style="opacity:.7">目标名义</span><br><b id="apStatTargetNotional">—</b></div>
+          <div><span style="opacity:.7">实际名义</span><br><b id="apStatActualNotional">—</b></div>
+          <div><span style="opacity:.7">权益</span><br><b id="apStatEquity">—</b></div>
+          <div><span style="opacity:.7">峰值权益</span><br><b id="apStatPeak">—</b></div>
+          <div><span style="opacity:.7">回撤</span><br><b id="apStatDd">—</b></div>
+          <div><span style="opacity:.7">熔断</span><br><b id="apStatBreaker">—</b></div>
+        </div>
+      </section>
+      <section class="panel chart-panel">
+        <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+        <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+        <div class="panel-head"><h2>运行日志</h2></div>
+        <pre class="log-view" id="apLogView">等待启动…</pre>
+      </section>
+    </div>
+    </div><!-- /page-autopilot -->
+
     <div class="modal" id="rtFeishuHelpModal" hidden>
       <div class="modal-backdrop" data-close-feishu-help></div>
       <div class="modal-card modal-card-feishu-help" role="dialog" aria-labelledby="rtFeishuHelpTitle">
@@ -567,6 +640,6 @@
   </div>
 
   <script src="/static/bg.js?v=1"></script>
-  <script src="/static/app.js?v=61"></script>
+  <script src="/static/app.js?v=62"></script>
 </body>
 </html>

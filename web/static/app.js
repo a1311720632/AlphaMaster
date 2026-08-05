@@ -1155,7 +1155,7 @@ async function stopTraining() {
 // 分页切换
 // ═══════════════════════════════════════════════════════════════════
 function switchPage(page) {
-  if (page !== "train" && page !== "backtest" && page !== "realtime") return;
+  if (page !== "train" && page !== "backtest" && page !== "realtime" && page !== "autopilot") return;
   currentPage = page;
   document.querySelectorAll(".stepper .step").forEach((s) => {
     s.classList.toggle("active", s.dataset.page === page);
@@ -1169,6 +1169,9 @@ function switchPage(page) {
   } else if (page === "realtime") {
     initRealtimeOnce();
     refreshRealtime();
+  } else if (page === "autopilot") {
+    initAutopilotOnce();
+    refreshAutopilot();
   }
 }
 
@@ -2495,12 +2498,159 @@ function renderRealtimeGrid(watches) {
   runCountUp(grid);
 }
 
+// ════════════════════════════════════════════════════════════════════
+// 自动驾驶（第四步：paper / testnet / live）
+// ════════════════════════════════════════════════════════════════════
+let apActive = false;
+let apInitDone = false;
+let apStrategyFile = "";
+
+function initAutopilotOnce() {
+  if (apInitDone) return;
+  apInitDone = true;
+  $("apBrowseStrategyBtn").addEventListener("click", browseAutopilotStrategy);
+  $("apStartBtn").addEventListener("click", startAutopilot);
+  $("apStopBtn").addEventListener("click", stopAutopilot);
+  // 从已保存设置恢复模式/品种/周期
+  fetchJSON("/api/settings", { silent: true })
+    .then((s) => {
+      if (s && s.autopilot_mode) $("apMode").value = s.autopilot_mode;
+      if (s && s.autopilot_symbol) $("apSymbol").value = s.autopilot_symbol;
+      if (s && s.autopilot_timeframe) $("apTimeframe").value = s.autopilot_timeframe;
+      if (s && s.autopilot_last_strategy) {
+        apStrategyFile = s.autopilot_last_strategy;
+        renderAutopilotStrategyCard(apStrategyFile);
+        updateApStartBtn();
+      }
+    })
+    .catch(() => {});
+}
+
+async function saveApSetting(patch) {
+  try {
+    await fetchJSON("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+      silent: true,
+    });
+  } catch (_) {}
+}
+
+function renderAutopilotStrategyCard(sf) {
+  const card = $("apStrategyCard");
+  card.replaceChildren();
+  if (!sf) {
+    const empty = document.createElement("div");
+    empty.className = "data-file-empty";
+    empty.textContent = "尚未选择策略文件";
+    card.appendChild(empty);
+    return;
+  }
+  const name = document.createElement("div");
+  name.className = "data-file-name";
+  name.textContent = sf.split(/[\\/]/).pop();
+  const path = document.createElement("div");
+  path.className = "data-file-path";
+  path.textContent = sf;
+  card.appendChild(name);
+  card.appendChild(path);
+}
+
+async function browseAutopilotStrategy() {
+  try {
+    const res = await fetchJSON("/api/strategy-file/browse", { silent: true });
+    if (res && res.strategy_file) {
+      apStrategyFile = res.strategy_file;
+      renderAutopilotStrategyCard(apStrategyFile);
+      saveApSetting({ autopilot_last_strategy: apStrategyFile });
+      updateApStartBtn();
+    }
+  } catch (e) {
+    showErrorPopup("选择策略失败", e.message);
+  }
+}
+
+function updateApStartBtn() {
+  $("apStartBtn").disabled = apActive || !apStrategyFile;
+}
+
+async function startAutopilot() {
+  if (!apStrategyFile) {
+    toastErr("请先选择策略文件");
+    return;
+  }
+  const body = {
+    strategy_file: apStrategyFile,
+    mode: $("apMode").value,
+    symbol: $("apSymbol").value.trim() || null,
+    timeframe: $("apTimeframe").value.trim() || null,
+  };
+  try {
+    await fetchJSON("/api/autopilot/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    await refreshAutopilot();
+  } catch (e) {
+    showErrorPopup("启动失败", e.message);
+  }
+}
+
+async function stopAutopilot() {
+  try {
+    await fetchJSON("/api/autopilot/stop", { method: "POST" });
+    await refreshAutopilot();
+  } catch (e) {
+    showErrorPopup("停止失败", e.message);
+  }
+}
+
+function fmtAp(v, digits = 4) {
+  if (v == null || Number.isNaN(v)) return "—";
+  return Number(v).toFixed(digits);
+}
+
+async function refreshAutopilot() {
+  let st;
+  try {
+    st = await fetchJSON("/api/autopilot/status", { silent: true });
+  } catch (_) {
+    return;
+  }
+  apActive = !!st.active;
+  updateApStartBtn();
+  $("apStopBtn").disabled = !apActive;
+  const job = st.job;
+  const stateStr = job?.state || "idle";
+  $("apStatusHint").textContent =
+    stateStr === "running" ? `运行中 · ${job.mode}` : (stateStr === "idle" ? "未启动" : stateStr);
+
+  const last = st.state?.last_bar;
+  const setB = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
+  setB("apStatMode", job?.mode || "—");
+  setB("apStatSym", `${job?.symbol || "—"} / ${job?.timeframe || "—"}`);
+  setB("apStatPos", last ? fmtSigned(last.target_pos, 4) : "—");
+  setB("apStatTargetNotional", last ? fmtSigned(last.target_notional, 2) : "—");
+  setB("apStatActualNotional", last ? fmtSigned(last.actual_notional, 2) : "—");
+  setB("apStatEquity", last ? fmtAp(last.equity, 6) : "—");
+  setB("apStatPeak", last ? fmtAp(last.peak_equity, 6) : "—");
+  setB("apStatDd", last ? fmtPct(last.drawdown_pct) : "—");
+  const tripped = st.state?.breaker_tripped;
+  setB("apStatBreaker", tripped ? `⚠ ${st.state?.breaker_reason || "已触发"}` : "正常");
+
+  const logView = $("apLogView");
+  if (logView) logView.textContent = (st.log_tail || []).join("\n") || "等待任务…";
+}
+
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => {
     refreshOverview();
     if (currentPage === "backtest" || btActive) refreshBacktest();
     if (currentPage === "realtime" || rtEngineRunning) refreshRealtime();
+    if (currentPage === "autopilot" || apActive) refreshAutopilot();
   }, 4000);
 }
 

@@ -26,6 +26,11 @@ _DEFAULT = {
     # tqsdk 天勤量化账号（国内期货实时数据源）
     "tqsdk_user": "七斗居士",
     "tqsdk_password": "ghhkphs8",
+    # 自动驾驶（第四步）：paper / testnet / live
+    "autopilot_mode": "paper",
+    "autopilot_last_strategy": "",
+    "autopilot_symbol": "",
+    "autopilot_timeframe": "",
 }
 
 
@@ -221,6 +226,15 @@ def save_settings(data: dict) -> dict:
         current["tqsdk_user"] = str(data["tqsdk_user"] or "").strip()
     if "tqsdk_password" in data:
         current["tqsdk_password"] = str(data["tqsdk_password"] or "").strip()
+    if "autopilot_mode" in data:
+        mode = str(data["autopilot_mode"] or "paper").strip().lower()
+        current["autopilot_mode"] = mode if mode in ("paper", "testnet", "live") else "paper"
+    if "autopilot_last_strategy" in data:
+        current["autopilot_last_strategy"] = str(data["autopilot_last_strategy"] or "").strip()
+    if "autopilot_symbol" in data:
+        current["autopilot_symbol"] = str(data["autopilot_symbol"] or "").strip()
+    if "autopilot_timeframe" in data:
+        current["autopilot_timeframe"] = str(data["autopilot_timeframe"] or "").strip()
     SETTINGS_PATH.write_text(
         json.dumps(current, indent=2, ensure_ascii=False),
         encoding="utf-8",

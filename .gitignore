@@ -83,6 +83,8 @@ ai_analysis_history.json
 train_elapsed.json
 training_time_*.json
 STOP_SIGNAL
+AUTOPILOT_STOP_SIGNAL
+autopilot_state.json
 train.pid
 train_stdout.log
 train_stderr.log

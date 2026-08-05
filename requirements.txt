@@ -24,6 +24,9 @@ MetaTrader5>=5.0.45
 tushare>=1.2.89
 pytdx>=1.72
 requests>=2.31.0
+# 加密交易所执行后端（自动驾驶第四步 · OKX）。CI/测试环境可不装——
+# autopilot/backends.py 对 ccxt 缺失优雅降级，paper 模式与导入图不依赖它。
+ccxt>=4.0.0
 # TradingView (tvDatafeed) — install via git if the VCS line fails on your network:
 #   python -m pip install git+https://github.com/rongardF/tvdatafeed.git
 tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git

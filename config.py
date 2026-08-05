@@ -41,6 +41,14 @@ class Config:
     MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
     MT5_SERVER   = os.getenv("MT5_SERVER", "")
 
+    # ── OKX（自动驾驶第四步 · 加密实盘）──────────────────────
+    # testnet=OKX demo trading（假币）；live=真实资金。paper 模式不读取这些。
+    OKX_API_KEY    = os.getenv("OKX_API_KEY", "")
+    OKX_SECRET_KEY = os.getenv("OKX_SECRET_KEY", "")
+    OKX_PASSPHRASE = os.getenv("OKX_PASSPHRASE", "")
+    # true=testnet/demo，false=live（仅 testnet/live 模式生效）
+    OKX_SANDBOX    = os.getenv("OKX_SANDBOX", "true").lower() == "true"
+
     # ── 品种与周期 ────────────────────────────────────────
     # TRADE_SYMBOLS：实际交易的品种（新账号，无 m 后缀）
     SYMBOLS   = [
@@ -200,10 +208,28 @@ class Config:
     # 设为整数（如 3）则启用约束（需回测里同步加同样约束才对标）
     MAX_OPEN_POSITIONS: int | None = None
 
+    # ── 自动驾驶（第四步）──────────────────────────────────────────
+    # 详见 docs/adr/0001…0006 与 CONTEXT.md。连续仓位·对齐回测，无单笔 SL/TP。
+    # 模式：paper（回测核心吃实时 bar，不下单）/ testnet（OKX demo，真实执行·假币）
+    #       / live（真实资金）。三模式共享同一信号核心，仅执行后端不同。
+    AUTOPILOT_MODE            = os.getenv("AUTOPILOT_MODE", "paper")
+    AUTOPILOT_EXCHANGE        = os.getenv("AUTOPILOT_EXCHANGE", "okx")
+    # 喂特征引擎的历史 bar 数（OKXSource 单次请求上限 300；足以预热最长特征 lookback）
+    AUTOPILOT_LOOKBACK_BARS   = 300
+    AUTOPILOT_PAPER_START_EQUITY = 1.0   # paper 模式模拟权益起点
+    # 小于该名义 delta 不下单（避免微小调仓刷手续费）；0=只要 delta≠0 就调
+    AUTOPILOT_MIN_NOTIONAL_DELTA = 0.0
+    # 运营熔断（ADR-0005）：破坏奇偶性的硬开关，为运营安全有意为之
+    AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT = -0.10   # 从峰值权益起算回撤 ≤ 该值 → 全平+停
+    AUTOPILOT_BREAKER_MAX_BARS_STALE   = 3       # 连续 N 次 行情/持仓 拉取失败 → 停
+
     # ── 文件路径 ──────────────────────────────────────────
     STRATEGY_FILE  = "best_mt5_strategy.json"
     PORTFOLIO_FILE = "portfolio_state.json"
     STOP_SIGNAL    = "STOP_SIGNAL"
+    # 自动驾驶状态文件（与 MT5 portfolio_state.json 分离）与独立 stop 文件
+    AUTOPILOT_STATE_FILE   = "autopilot_state.json"
+    AUTOPILOT_STOP_SIGNAL  = "AUTOPILOT_STOP_SIGNAL"
 
     # ── Magic Number ──────────────────────────────────────
     MAGIC_NUMBER = 20250101

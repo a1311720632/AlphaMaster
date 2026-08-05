@@ -1,0 +1,206 @@
+"""Subprocess manager for run_autopilot.py jobs（第四步：自动驾驶）。
+
+镜像 web/training_manager.py：JobState / AutopilotJob / start / stop / status / tail_log。
+以 subprocess 方式拉起 run_autopilot.py，stdout/stderr 落 logs/autopilot_*.log。
+进程隔离：自动驾驶崩溃不会拖垮 web 进程；状态文件 autopilot_state.json 供前端读取。
+"""
+from __future__ import annotations
+
+import os
+import signal
+import subprocess
+import sys
+import threading
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from utils.train_logging import strip_ansi
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LOG_DIR = PROJECT_ROOT / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+_MODES = ("paper", "testnet", "live")
+
+
+class JobState(str, Enum):
+    IDLE = "idle"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    STOPPED = "stopped"
+
+
+@dataclass
+class AutopilotJob:
+    strategy_file: str
+    mode: str
+    symbol: str
+    timeframe: str
+    state: JobState = JobState.RUNNING
+    pid: int | None = None
+    log_path: str = ""
+    started_at: str = ""
+    finished_at: str | None = None
+    exit_code: int | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "strategy_file": self.strategy_file,
+            "mode": self.mode,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "state": self.state.value,
+            "pid": self.pid,
+            "log_path": self.log_path,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "exit_code": self.exit_code,
+            "error": self.error,
+        }
+
+
+class AutopilotManager:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._job: AutopilotJob | None = None
+        self._log_fp = None
+        self._stopped_by_user = False
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            self._refresh_state()
+            return {
+                "active": self._job is not None and self._job.state == JobState.RUNNING,
+                "job": self._job.to_dict() if self._job else None,
+            }
+
+    def start(
+        self,
+        *,
+        strategy_file: str,
+        mode: str = "paper",
+        symbol: str | None = None,
+        timeframe: str | None = None,
+    ) -> AutopilotJob:
+        if mode not in _MODES:
+            raise ValueError(f"未知 mode: {mode}（可选 {list(_MODES)}）")
+        with self._lock:
+            self._refresh_state()
+            if self._proc is not None and self._proc.poll() is None:
+                raise RuntimeError("已有自动驾驶任务在运行")
+
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            safe = (symbol or "auto").replace(".", "_").replace("/", "_")
+            log_path = LOG_DIR / f"autopilot_{safe}_{ts}.log"
+
+            cmd = [
+                sys.executable, "-u", "run_autopilot.py",
+                "--strategy-file", strategy_file,
+                "--mode", mode,
+            ]
+            if symbol:
+                cmd += ["--symbol", symbol]
+            if timeframe:
+                cmd += ["--timeframe", timeframe]
+
+            self._log_fp = open(log_path, "w", encoding="utf-8", buffering=1)
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
+            env["LOGURU_COLORIZE"] = "0"
+
+            creationflags = 0
+            if sys.platform == "win32":
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+
+            self._stopped_by_user = False
+            self._proc = subprocess.Popen(
+                cmd,
+                cwd=PROJECT_ROOT,
+                stdout=self._log_fp,
+                stderr=subprocess.STDOUT,
+                env=env,
+                creationflags=creationflags,
+            )
+            self._job = AutopilotJob(
+                strategy_file=strategy_file,
+                mode=mode,
+                symbol=symbol or "",
+                timeframe=timeframe or "",
+                pid=self._proc.pid,
+                log_path=str(log_path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+                started_at=datetime.now(timezone.utc).isoformat(),
+            )
+            return self._job
+
+    def stop(self) -> bool:
+        with self._lock:
+            if self._proc is None or self._proc.poll() is not None:
+                return False
+            self._stopped_by_user = True
+            try:
+                self._proc.terminate()
+            except Exception:
+                self._proc.kill()
+            return True
+
+    def tail_log(self, lines: int = 200) -> list[str]:
+        with self._lock:
+            if not self._job or not self._job.log_path:
+                return []
+            path = PROJECT_ROOT / self._job.log_path
+            if not path.exists():
+                return []
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return []
+            return [strip_ansi(line) for line in content.splitlines()[-lines:]]
+
+    def _refresh_state(self) -> None:
+        if self._proc is None or self._job is None:
+            return
+        code = self._proc.poll()
+        if code is None:
+            return
+        self._job.exit_code = code
+        self._job.finished_at = datetime.now(timezone.utc).isoformat()
+        if self._job.state == JobState.RUNNING:
+            if self._stopped_by_user:
+                self._job.state = JobState.STOPPED
+            elif code == 0:
+                self._job.state = JobState.COMPLETED
+            elif code < 0:
+                self._job.state = JobState.STOPPED
+            else:
+                self._job.state = JobState.FAILED
+        if self._job.state == JobState.FAILED and self._job.error is None:
+            self._job.error = f"自动驾驶进程异常退出 (exit_code={code})"
+            try:
+                if self._job.log_path:
+                    path = PROJECT_ROOT / self._job.log_path
+                    with path.open("a", encoding="utf-8") as fp:
+                        fp.write(f"\n[Web] 自动驾驶进程已结束，退出码: {code}\n")
+            except OSError:
+                pass
+        if self._log_fp:
+            try:
+                self._log_fp.flush()
+                self._log_fp.close()
+            except Exception:
+                pass
+            self._log_fp = None
+        self._proc = None
+
+
+autopilot_manager = AutopilotManager()
