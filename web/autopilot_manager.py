@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -27,6 +28,35 @@ LOG_DIR = PROJECT_ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 _MODES = ("paper", "testnet", "live")
+
+_PROJECT_ROOT_RESOLVED = PROJECT_ROOT.resolve()
+_LOG_DIR_RESOLVED = LOG_DIR.resolve()
+
+
+def _validate_strategy_path(strategy_file: str) -> str:
+    """Defense-in-depth：策略路径必须存在、为 .json、且在项目根目录内。
+
+    本工具可触发真实下单（比回测更敏感），故把策略路径限定在 PROJECT_ROOT 内，
+    防止路径穿越读取任意文件。训练产物正常位于 strategies/（在 PROJECT_ROOT 内）。
+    与回测的 browse-anywhere 不同——这是有意的更紧约束。
+    """
+    p = Path(strategy_file).expanduser()
+    if not p.is_file():
+        raise ValueError(f"策略文件不存在或不是普通文件: {strategy_file}")
+    if p.suffix.lower() != ".json":
+        raise ValueError(f"策略文件必须是 .json: {strategy_file}")
+    try:
+        resolved = p.resolve()
+        resolved.relative_to(_PROJECT_ROOT_RESOLVED)
+    except ValueError as exc:
+        raise ValueError("策略文件必须在项目根目录内（防止路径穿越）") from exc
+    return str(resolved)
+
+
+def _safe_log_symbol(symbol: str | None) -> str:
+    """净化 symbol 为日志文件名安全片段（剥离所有路径分隔符/特殊字符，限长）。"""
+    clean = re.sub(r"[^\w\-]", "_", symbol or "auto")
+    return (clean[:50] or "auto")
 
 
 class JobState(str, Enum):
@@ -93,14 +123,17 @@ class AutopilotManager:
     ) -> AutopilotJob:
         if mode not in _MODES:
             raise ValueError(f"未知 mode: {mode}（可选 {list(_MODES)}）")
+        strategy_file = _validate_strategy_path(strategy_file)  # 路径穿越防护
         with self._lock:
             self._refresh_state()
             if self._proc is not None and self._proc.poll() is None:
                 raise RuntimeError("已有自动驾驶任务在运行")
 
             ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            safe = (symbol or "auto").replace(".", "_").replace("/", "_")
-            log_path = LOG_DIR / f"autopilot_{safe}_{ts}.log"
+            clean_symbol = _safe_log_symbol(symbol)  # 剥离路径分隔符，防日志文件穿越
+            log_path = (LOG_DIR / f"autopilot_{clean_symbol}_{ts}.log").resolve()
+            if log_path.parent != _LOG_DIR_RESOLVED:
+                raise ValueError("日志路径越界")
 
             cmd = [
                 sys.executable, "-u", "run_autopilot.py",
@@ -113,6 +146,9 @@ class AutopilotManager:
                 cmd += ["--timeframe", timeframe]
 
             self._log_fp = open(log_path, "w", encoding="utf-8", buffering=1)
+            # 子进程是第一方 run_autopilot.py，testnet/live 需要 OKX_*/MT5_* 等凭据，
+            # ccxt 也可能依赖 HTTP_PROXY/SSL_CERT_FILE 等。沿用 training_manager 的
+            # os.environ.copy() 模式（仓库既定约定），不做更紧的 env 白名单以免破坏配置加载。
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
