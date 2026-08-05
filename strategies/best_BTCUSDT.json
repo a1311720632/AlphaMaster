@@ -1,0 +1,19 @@
+{
+  "vocab_version": "v9217a2c0d91a",
+  "symbol": "BTCUSDT",
+  "formula": [
+    4,
+    88,
+    13,
+    109,
+    79,
+    99,
+    89,
+    65
+  ],
+  "best_score": 0.8205889463424683,
+  "formula_decoded": "SLOPE20 → MOMENTUM_10 → AC1 → CS_RANK → TS_MEAN_20 → DELTA → TS_MAX_10 → ADD",
+  "train_step": 0,
+  "timeframe": "H1",
+  "mode": "parquet_file"
+}

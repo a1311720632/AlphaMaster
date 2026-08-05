@@ -1,0 +1,19 @@
+{
+  "vocab_version": "v9217a2c0d91a",
+  "symbol": "ETHUSDT",
+  "formula": [
+    57,
+    122,
+    15,
+    122,
+    98,
+    50,
+    95,
+    126
+  ],
+  "best_score": 2.0409703254699707,
+  "formula_decoded": "ROLL_SKEW_20 → WINSORIZE → VOL_Z → WINSORIZE → TS_MAX_20 → TRIX_SIGNAL → TS_QUANTILE_10 → IF_GT",
+  "train_step": 0,
+  "timeframe": "H1",
+  "mode": "parquet_file"
+}

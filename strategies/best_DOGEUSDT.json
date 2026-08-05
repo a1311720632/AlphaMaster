@@ -1,0 +1,19 @@
+{
+  "vocab_version": "v9217a2c0d91a",
+  "symbol": "DOGEUSDT",
+  "formula": [
+    39,
+    62,
+    55,
+    22,
+    97,
+    56,
+    126,
+    72
+  ],
+  "best_score": 2.353426218032837,
+  "formula_decoded": "YANG_ZHANG_VOL → RET_ENTROPY_20 → SUPERTREND_DIR → BOLL_WIDTH → TS_MIN_20 → SAR_DIST → IF_GT → GATE",
+  "train_step": 0,
+  "timeframe": "H1",
+  "mode": "parquet_file"
+}

@@ -1,0 +1,19 @@
+{
+  "vocab_version": "v9217a2c0d91a",
+  "symbol": "XAUUSD",
+  "formula": [
+    34,
+    78,
+    97,
+    31,
+    115,
+    97,
+    78,
+    97
+  ],
+  "best_score": 2.081951141357422,
+  "formula_decoded": "PPO → TS_MEAN_10 → TS_MIN_20 → TREND_STRENGTH_50 → MIN → TS_MIN_20 → TS_MEAN_10 → TS_MIN_20",
+  "train_step": 0,
+  "timeframe": "M15",
+  "mode": "parquet_file"
+}
