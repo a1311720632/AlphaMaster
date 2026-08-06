@@ -1325,6 +1325,7 @@ const METRIC_FMT = {
   ratio: (v) => v.toFixed(3),
   int: (v) => Math.round(v).toLocaleString(),
   winrate: (v) => (v * 100).toFixed(1) + "%",
+  dd: (v) => (v * 100).toFixed(1) + "%", // 无符号百分比（回撤 / 占比）
   strength: (v) => Math.round(v * 100) + "%",
 };
 
@@ -1433,6 +1434,19 @@ function renderPortfolio(report) {
     { label: "盈亏比", raw: Number.isFinite(plNum) ? plNum : null, fmt: "ratio", cls: Number.isFinite(plNum) ? "accent" : "" },
     { label: "交易数", raw: Number.isFinite(Number(nTrades)) ? Number(nTrades) : null, fmt: "int", cls: "" },
     { label: "胜率", raw: winRate != null ? Number(winRate) : null, fmt: "winrate", cls: "" },
+    // ── A 波扩展：风险 / 基准 / 暴露 / 成本 ──────────────────────
+    { label: "最大回撤", raw: symData?.max_drawdown ?? null, fmt: "dd", cls: (symData?.max_drawdown ?? 0) > 0.2 ? "neg" : "" },
+    { label: "Calmar", raw: symData?.calmar ?? null, fmt: "ratio", cls: "accent" },
+    { label: "买入持有", raw: symData?.buy_hold_total ?? null, fmt: "pct", cls: (symData?.buy_hold_total ?? 0) >= 0 ? "pos" : "neg" },
+    { label: "多头占比", raw: symData?.long_pct ?? null, fmt: "winrate", cls: "" },
+    { label: "成本占比", raw: symData?.cost_ratio ?? null, fmt: "dd", cls: (symData?.cost_ratio ?? 0) > 0.3 ? "neg" : "" },
+    // ── B2：连赢/连亏 ──────────────────────────────────────────
+    { label: "最大连赢", raw: symData?.max_consec_wins ?? null, fmt: "int", cls: "accent" },
+    { label: "最大连亏", raw: symData?.max_consec_losses ?? null, fmt: "int", cls: (symData?.max_consec_losses ?? 0) > 10 ? "neg" : "" },
+    // ── C：信号质量 ────────────────────────────────────────────
+    { label: "信息系数IC", raw: symData?.ic ?? null, fmt: "signed", cls: (symData?.ic ?? 0) > 0 ? "accent" : "neg" },
+    { label: "前半Sortino", raw: symData?.sortino_first ?? null, fmt: "signed", cls: "accent" },
+    { label: "后半Sortino", raw: symData?.sortino_second ?? null, fmt: "signed", cls: (symData?.sortino_second ?? 0) > 0 ? "accent" : "neg" },
   ];
 
   // 签名守卫：数值/焦点/资金曲线未变则不重建，避免每次轮询重播动画
@@ -1499,6 +1513,8 @@ function renderBacktestTable(symbols) {
 // ═══════════════════════════════════════════════════════════════════
 let equityChart = null;
 let rollingChart = null;
+let drawdownChart = null;
+let tradeDistChart = null;
 let btEquitySig = "";
 
 const EQUITY_COLORS = [
@@ -1609,6 +1625,8 @@ const ROLLING_OPTIONS = {
 function destroyEquityCharts() {
   if (equityChart) { equityChart.destroy(); equityChart = null; }
   if (rollingChart) { rollingChart.destroy(); rollingChart = null; }
+  if (drawdownChart) { drawdownChart.destroy(); drawdownChart = null; }
+  if (tradeDistChart) { tradeDistChart.destroy(); tradeDistChart = null; }
 }
 
 function renderEquityStats(name, series) {
@@ -1676,6 +1694,25 @@ function buildEquityChart(labels, symbols, portfolio) {
       backgroundColor: (ctx) => verticalGradient(ctx.chart, col.rgb, 0.3, 0),
     };
   });
+  // ── A 波：单品种叠加买入持有基准线（虚线；与 equity 同口径 = 累计对数收益）
+  if (!multi) {
+    const bh = symbols[symNames[0]] && symbols[symNames[0]].buy_hold;
+    if (bh) {
+      datasets.push({
+        label: "买入持有 (Buy & Hold)",
+        data: bh,
+        borderColor: "#94a3b8",
+        borderWidth: 1.6,
+        borderDash: [5, 4],
+        tension: 0.25,
+        pointRadius: 0,
+        pointHoverRadius: 3,
+        pointHoverBackgroundColor: "#94a3b8",
+        pointHoverBorderColor: "#05070d",
+        fill: false,
+      });
+    }
+  }
   if (portfolio) {
     datasets.push({
       label: "等权组合",
@@ -1738,6 +1775,174 @@ function buildRollingChart(labels, series, windowBars) {
   });
 }
 
+function buildDrawdownChart(labels, series) {
+  const canvas = $("btDrawdownChart");
+  if (!canvas) return;
+  if (drawdownChart) drawdownChart.destroy();
+  const data = series.drawdown || [];
+  const vals = data.filter((v) => v != null);
+  const ddMin = vals.length ? Math.min(...vals) : -1;
+  drawdownChart = new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "水下回撤",
+          data,
+          borderColor: "#f87171",
+          borderWidth: 1.4,
+          tension: 0.2,
+          pointRadius: 0,
+          pointHoverRadius: 3,
+          pointHoverBackgroundColor: "#f87171",
+          pointHoverBorderColor: "#05070d",
+          fill: true,
+          backgroundColor: "rgba(248, 113, 113, 0.18)",
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => "回撤 " + (ctx.parsed.y * 100).toFixed(2) + "%" } },
+      },
+      scales: {
+        x: { display: false },
+        y: {
+          suggestedMax: 0,
+          suggestedMin: ddMin * 1.1,
+          ticks: { color: "#7d8aa3", callback: (v) => (v * 100).toFixed(0) + "%" },
+          grid: { color: "rgba(125,138,163,0.12)" },
+        },
+      },
+    },
+  });
+}
+
+function buildTradeDistChart(series) {
+  const canvas = $("btTradeDistChart");
+  if (!canvas) return;
+  if (tradeDistChart) tradeDistChart.destroy();
+  const th = series.trade_hist || {};
+  const counts = th.counts || [];
+  const edges = th.edges || [];
+  const n = counts.length;
+  const labels = [];
+  const colors = [];
+  for (let i = 0; i < n; i++) {
+    const center = (edges[i] + edges[i + 1]) / 2;
+    labels.push((center * 100).toFixed(2) + "%");
+    colors.push(center >= 0 ? "rgba(74,222,128,0.55)" : "rgba(248,113,113,0.55)");
+  }
+  tradeDistChart = new Chart(canvas.getContext("2d"), {
+    type: "bar",
+    data: { labels, datasets: [{ label: "交易数", data: counts, backgroundColor: colors, borderColor: colors, borderWidth: 0 }] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { title: (items) => "单笔收益 " + items[0].label, label: (ctx) => ctx.parsed.y + " 笔" } },
+      },
+      scales: {
+        x: { ticks: { color: "#7d8aa3", maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } },
+        y: { beginAtZero: true, ticks: { color: "#7d8aa3" }, grid: { color: "rgba(125,138,163,0.12)" } },
+      },
+    },
+  });
+}
+
+function renderMonthlyHeatmap(series) {
+  const el = $("btMonthlyHeatmap");
+  if (!el) return;
+  // 热力图是 HTML grid（按年行数自适应），需覆盖父容器 .equity-chart-wrap.roll 的固定 150px 高度，
+  // 否则会溢出盖到下方的"回测怎么算"说明框。
+  if (el.parentElement) {
+    el.parentElement.style.height = "auto";
+    el.parentElement.style.minHeight = "140px";
+  }
+  if (!document.getElementById("hm-style")) {
+    const st = document.createElement("style");
+    st.id = "hm-style";
+    st.textContent =
+      ".hm-row{display:flex;gap:2px;margin-bottom:2px}" +
+      ".hm-cell{width:40px;height:24px;display:flex;align-items:center;justify-content:center;font-size:8.5px;color:#dbe3f1;border-radius:3px}" +
+      ".hm-yl{width:44px;color:#9aa6bd;font-size:10px;justify-content:flex-start;padding-left:2px}" +
+      ".hm-mh{color:#7d8aa3;font-size:9px}" +
+      ".hm-yr{width:50px;font-weight:600;color:#e8edf4}" +
+      ".hm-empty{color:#3a465e}";
+    document.head.appendChild(st);
+  }
+  // 仅接受数值字段（year/month/ret），非数值一律丢弃 —— 防 innerHTML 注入
+  const rows = (series.monthly_returns || [])
+    .map((r) => ({ year: Number(r.year), month: Number(r.month), ret: Number(r.ret) }))
+    .filter((r) => isFinite(r.year) && isFinite(r.month) && isFinite(r.ret));
+  if (!rows.length) { el.textContent = ""; el.className = "hm-empty"; el.appendChild(document.createTextNode("无月度数据")); return; }
+  const map = {};
+  let maxAbs = 0;
+  rows.forEach((r) => {
+    map[r.year + "_" + r.month] = r.ret;
+    if (Math.abs(r.ret) > maxAbs) maxAbs = Math.abs(r.ret);
+  });
+  const years = [...new Set(rows.map((r) => r.year))].sort((a, b) => a - b);
+  const yearTotals = {};
+  rows.forEach((r) => { yearTotals[r.year] = (yearTotals[r.year] || 0) + r.ret; });
+  const colorFor = (ret) => {
+    if (ret == null || !isFinite(ret)) return "#1a2233";
+    const intensity = 0.15 + (Math.abs(ret) / (maxAbs || 1)) * 0.7;
+    return ret >= 0 ? `rgba(74,222,128,${intensity.toFixed(3)})` : `rgba(248,113,113,${intensity.toFixed(3)})`;
+  };
+  let html = '<div class="hm-row"><span class="hm-cell hm-yl">年＼月</span>';
+  for (let m = 1; m <= 12; m++) html += `<span class="hm-cell hm-mh">${m}</span>`;
+  html += '<span class="hm-cell hm-mh">全年</span></div>';
+  years.forEach((y) => {
+    html += `<div class="hm-row"><span class="hm-cell hm-yl">${y}</span>`;
+    for (let m = 1; m <= 12; m++) {
+      const ret = map[y + "_" + m];
+      const has = ret != null && isFinite(ret);
+      html += `<span class="hm-cell" style="background:${colorFor(has ? ret : null)}" title="${y}年${m}月 ${has ? (ret * 100).toFixed(2) + "%" : "无数据"}">${has ? (ret * 100).toFixed(1) : ""}</span>`;
+    }
+    const yt = yearTotals[y];
+    html += `<span class="hm-cell hm-yr" style="background:${colorFor(yt)}">${(yt * 100).toFixed(0)}</span>`;
+    html += "</div>";
+  });
+  el.innerHTML = html;
+}
+
+function renderWfTable(series) {
+  const el = $("btWfTable");
+  if (!el) return;
+  if (el.parentElement) { el.parentElement.style.height = "auto"; el.parentElement.style.minHeight = "120px"; }
+  if (!document.getElementById("wf-style")) {
+    const st = document.createElement("style");
+    st.id = "wf-style";
+    st.textContent =
+      ".wf-tbl{width:100%;border-collapse:collapse;font-size:12px}" +
+      ".wf-tbl th,.wf-tbl td{padding:5px 8px;text-align:right;border-bottom:1px solid rgba(125,138,163,0.14)}" +
+      ".wf-tbl th{color:#7d8aa3;font-weight:500}" +
+      ".wf-tbl td:nth-child(1),.wf-tbl td:nth-child(2),.wf-tbl th:nth-child(1),.wf-tbl th:nth-child(2){text-align:left}" +
+      ".wf-tbl .pos{color:#4ade80}.wf-tbl .neg{color:#f87171}.wf-tbl .accent{color:#5eead4}";
+    document.head.appendChild(st);
+  }
+  const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+  const segs = (series.wf_segments || [])
+    .map((s) => ({ fold: Number(s.fold), period: esc(s.period), bars: Number(s.bars), ret: Number(s.return), sharpe: Number(s.sharpe) }))
+    .filter((s) => isFinite(s.fold) && isFinite(s.ret) && isFinite(s.sharpe));
+  if (!segs.length) { el.textContent = ""; el.className = "hm-empty"; el.appendChild(document.createTextNode("无分段数据")); return; }
+  let html = '<table class="wf-tbl"><thead><tr><th>折</th><th>样本外区间</th><th>收益</th><th>Sharpe</th></tr></thead><tbody>';
+  segs.forEach((s) => {
+    const retCls = s.ret >= 0 ? "pos" : "neg";
+    const shCls = s.sharpe >= 1 ? "accent" : (s.sharpe < 0 ? "neg" : "");
+    html += `<tr><td>${s.fold}</td><td>${s.period}</td><td class="${retCls}">${(s.ret * 100).toFixed(1)}%</td><td class="${shCls}">${s.sharpe >= 0 ? "+" : ""}${s.sharpe.toFixed(2)}</td></tr>`;
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
 function renderEquity(resp) {
   const live = $("btEquityLive");
   const empty = $("btEquityEmpty");
@@ -1775,6 +1980,10 @@ function renderEquity(resp) {
   renderEquityStats(mainName, mainSeries);
   buildEquityChart(data.labels, symbols, portfolio);
   buildRollingChart(data.labels, mainSeries, data.rolling_window);
+  buildDrawdownChart(data.labels, mainSeries);
+  buildTradeDistChart(mainSeries);
+  renderMonthlyHeatmap(mainSeries);
+  renderWfTable(mainSeries);
 
   if ($("btChartsHint")) {
     $("btChartsHint").textContent = `${mainName} · 交互式资金曲线 · 悬停查看数值`;
