@@ -55,6 +55,16 @@ from strategy_manager.live_signal import min_exposure
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 BACKTEST_OUTPUT_DIR = ROOT / "backtest_output"
 
+
+class NoCacheStaticFiles(StaticFiles):
+    """静态资源禁用启发式缓存：浏览器每次必须带 ETag 向服务器校验
+    （未变→304 走缓存，变了→立即拉新），避免改了 app.js 后旧脚本被复用。"""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
 setup_logging()
 logger = get_logger()
 
@@ -1165,4 +1175,4 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
