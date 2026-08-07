@@ -15,10 +15,10 @@ from model_core.vm import StackVM
 
 # 默认无信号阈值（与 signal.MIN_TRADE_EXPOSURE 一致）；实际值在调用时从 Config 读取
 _DEFAULT_MIN_EXPOSURE = 0.05
-# 默认最小 bar 数；实际值在调用时从 Config 读取（保证训练-实盘一致）
-# 训练侧 Config.MIN_BARS=3000，特征侧 _NORM_WINDOW=200，EMA_26 的 2*w_full=360
-# 实盘必须 ≥ max(Config.MIN_BARS, 2 * max_ema_w_full) 才能避免 train-serve skew
-_DEFAULT_MIN_BARS = 500
+# 默认最小 bar 数；实盘用独立阈值（与训练侧 Config.MIN_BARS 解耦）
+# 特征 warm-up（_NORM_WINDOW=200, EMA_26 的 2*w_full=360）+ 滚动归一化窗口 500
+# 实盘阈值 800，训练侧 Config.MIN_BARS=3000 仅用于训练数据过滤
+_DEFAULT_MIN_BARS = 800
 
 
 def _min_trade_exposure() -> float:
@@ -31,14 +31,21 @@ def _min_trade_exposure() -> float:
 
 
 def _min_bars() -> int:
-    """调用时从 Config 读取最小 bar 数，与训练侧 Config.MIN_BARS 对齐。"""
+    """实盘最小 bar 数，与训练侧 Config.MIN_BARS 解耦。
+
+    训练侧需要 3000 根是为了 expanding z-score 归一化收敛 + 训练样本量；
+    实盘只需特征 warm-up + 滚动归一化窗口即可：
+      - 特征 _NORM_WINDOW=200, EMA_26 的 2*w_full=360 → warm-up ~360
+      - vm._normalize_output 滚动窗口 500 → 归一化 warm-up 500
+    取 max(800, ...) 保证数值路径稳定。
+    """
+    _REALTIME_MIN_BARS = 800
     try:
         from config import Config
-        # 实盘需要：特征 warm-up（_NORM_WINDOW=200）+ EMA_26 递推稳定（2*w_full=360）
-        # 取 max(Config.MIN_BARS, 500) 保证数值路径与训练一致
-        return max(int(getattr(Config, "MIN_BARS", _DEFAULT_MIN_BARS)), _DEFAULT_MIN_BARS)
+        # 不再用 Config.MIN_BARS（训练侧 3000），实盘用独立阈值
+        return max(_REALTIME_MIN_BARS, int(getattr(Config, "REALTIME_MIN_BARS", _REALTIME_MIN_BARS)))
     except Exception:  # noqa: BLE001
-        return _DEFAULT_MIN_BARS
+        return _REALTIME_MIN_BARS
 
 
 # 向后兼容：暴露模块级常量（实际逻辑用 _min_bars() 调用）

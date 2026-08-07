@@ -158,15 +158,16 @@ class StackVM:
 
         策略（两级降级，全部因果）：
         1. 截面 zscore（跨品种，每时间步）：适合因子跨品种有分散
-        2. 时序 zscore（每品种，expanding 无 look-ahead）
+        2. 滚动时序 zscore（每品种，固定窗口 500，无 look-ahead）
 
-        P2-8 修复：
-        - 原代码用 `cs_z.std() >= 0.3` 和 `ts_z.std() >= 0.1` 决定走哪条分支，
-          但这些 std 是全局统计（含未来），引入轻微 look-ahead bias。
-        - 修复：路径选择改为基于「全局 std 是否过小」的因果判断（x.std() 是
-          常数检测，不依赖时间），然后优先用截面 zscore（N>1 时）或时序 zscore。
-          归一化本身仍是因果的（cs_std 沿 N 维、ts_std 用 expanding）。
-        - 去掉「std >= 0.3 才用截面」的判断：直接走截面（N>1）→ 时序的降级链。
+        P2-8 修复（原 expanding → rolling）：
+        - 原代码用 expanding（累积）z-score：最后一根 bar 的 mean/std 吃全部历史，
+          导致因子值依赖历史长度（300 根 vs 1988 根会漂移甚至变号），
+          实时分析被迫要求 3000 根 bar 等待累积归一化收敛。
+        - 改为滚动 z-score（窗口 500）：最后一根 bar 只依赖最近 500 期，
+          与历史长度无关，实时门槛降至 ~800（特征 warm-up 200 + 归一化 500）。
+        - T < 窗口时退化为 expanding（样本不足时仍因果，无 look-ahead）。
+        - warm-up 期（前 window-1 根）输出 0（因子中性，不出信号）。
 
         Returns:
             [N, T] clip 到 [-3, 3]，若是常数则返回原值（engine 会过滤）
@@ -184,20 +185,37 @@ class StackVM:
             cs_mean = x.mean(dim=0, keepdim=True)
             cs_std  = x.std(dim=0, keepdim=True).clamp(min=1e-8)
             cs_z    = (x - cs_mean) / cs_std
-            # P2-8: 不再用 cs_z.std()（全局，含未来）做路径选择
-            # 若截面 std 在某些时间步过小，cs_z 会很大，但 clamp 到 [-3,3] 即可
             return torch.clamp(cs_z, -3.0, 3.0)
 
-        # ── 时序标准化（每品种独立，expanding 无 look-ahead）─────────
-        # N=1 时只能用时序归一化
-        # 每个 t 仅用 x[:, :t+1] 计算 mean/std，避免用 t 之后的未来统计量
-        cnt = torch.arange(1, T + 1, device=x.device, dtype=x.dtype).view(1, T)
-        cumsum = x.cumsum(dim=1)
-        ts_mean = cumsum / cnt                          # [N,T]，t 位 = x[:,:t+1].mean()
-        cumsum_sq = (x * x).cumsum(dim=1)
-        ts_var = (cumsum_sq / cnt) - ts_mean * ts_mean  # E[x^2] - E[x]^2
-        ts_std = ts_var.clamp(min=1e-8).sqrt()
-        ts_z = (x - ts_mean) / ts_std
+        # ── 滚动时序标准化（每品种独立，固定窗口，无 look-ahead）─────
+        # N=1 时使用滚动 z-score（窗口 500），替代原 expanding z-score。
+        # 滚动窗口使最后一根 bar 的值仅依赖最近 500 期，与历史长度无关；
+        # T < 窗口时退化为 expanding（仍因果）。
+        _ROLL_WINDOW = 500
+
+        if T < _ROLL_WINDOW:
+            # 样本不足：退化为 expanding z-score（仍因果，无 look-ahead）
+            cnt = torch.arange(1, T + 1, device=x.device, dtype=x.dtype).view(1, T)
+            cumsum = x.cumsum(dim=1)
+            ts_mean = cumsum / cnt
+            cumsum_sq = (x * x).cumsum(dim=1)
+            ts_var = (cumsum_sq / cnt) - ts_mean * ts_mean
+            ts_std = ts_var.clamp(min=1e-8).sqrt()
+            ts_z = (x - ts_mean) / ts_std
+            return torch.clamp(ts_z, -3.0, 3.0)
+
+        # 滚动均值/标准差（窗口 _ROLL_WINDOW，因果：只用 [t-W+1, t]）
+        # 通过 unfold 实现滑动窗口
+        padded = torch.nn.functional.pad(x, (_ROLL_WINDOW - 1, 0), value=0.0)  # [N, T+W-1]
+        windows = padded.unfold(1, _ROLL_WINDOW, 1)  # [N, T, W]
+        ts_mean = windows.mean(dim=2)       # [N, T]
+        ts_std = windows.std(dim=2).clamp(min=1e-8)  # [N, T]
+        ts_z = (x - ts_mean) / ts_std       # [N, T]
+
+        # warm-up 期（前 _ROLL_WINDOW-1 根）输出 0（因子中性，不出信号）
+        warmup_mask = torch.arange(T, device=x.device) < (_ROLL_WINDOW - 1)
+        ts_z[:, warmup_mask] = 0.0
+
         return torch.clamp(ts_z, -3.0, 3.0)
 
     def execute(self, formula_tokens, feat_tensor):

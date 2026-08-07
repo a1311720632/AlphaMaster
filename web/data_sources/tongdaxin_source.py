@@ -32,15 +32,33 @@ _PRESETS = ["600519", "000001", "300750", "601318", "000858", "sh000001", "sz399
 
 
 def _parse_market(code: str) -> tuple[int, str]:
-    """返回 (market, pure_code)。1=上海, 0=深圳。"""
+    """返回 (market, pure_code)。1=上海, 0=深圳。
+
+    优先按代码本身判定市场（002/003/300/301=深市中小板/创业板，
+    60/688/689=沪市主板/科创板，5=沪市基金，9=沪市B股，11/13=沪市转债），
+    仅当代码本身有歧义时（000xxx 可能是上证指数或深市股票）才以 sh/sz 前缀为准。
+    这样即使用户误写 sh002080 也能自动纠正为深市。
+    """
     c = code.strip().upper()
-    if c.startswith("SH"):
-        return 1, c[2:]
-    if c.startswith("SZ"):
-        return 0, c[2:]
-    if c[:1] in ("6", "5", "9") or c.startswith("11") or c.startswith("13"):
-        return 1, c
-    return 0, c
+    has_prefix = c.startswith("SH") or c.startswith("SZ")
+    prefix_market = 1 if c.startswith("SH") else 0
+    pure = c[2:] if has_prefix else c
+
+    # 无歧义代码：按代码前缀直接判定，忽略用户写的 sh/sz 前缀
+    if pure.startswith(("002", "003", "300", "301")):
+        return 0, pure  # 深市中小板 / 创业板
+    if pure.startswith(("60", "688", "689")):
+        return 1, pure  # 沪市主板 / 科创板
+    if pure[:1] in ("5", "9") or pure.startswith(("11", "13")):
+        return 1, pure  # 沪市基金 / B股 / 转债
+    if pure.startswith("399"):
+        return 0, pure  # 深证指数
+
+    # 歧义代码：000xxx — 上证指数(sh000001/sh000300) vs 深市股票(sz000001=平安银行)
+    # 此时以 sh/sz 前缀为准；无前缀则默认深市股票
+    if has_prefix:
+        return prefix_market, pure
+    return 0, pure  # 无前缀的 000xxx 默认深市股票
 
 
 _CST = timezone(timedelta(hours=8))  # 通达信返回的 datetime 为北京时间（UTC+8）
@@ -138,15 +156,66 @@ class TongdaxinSource(DataSource):
                 pass
         self._api = None
 
-    def _fetch_raw(self, cat: int, market: int, code: str, want: int, is_index: bool):
+    def _fetch_raw(self, cat: int, market: int, code: str, want: int, is_index: bool, start: int = 0):
         """指数走 get_index_bars，股票走 get_security_bars。
 
         通达信协议规定指数必须用 get_index_bars；若对指数用 get_security_bars，
         返回数据从第 2 条起 datetime 会损坏（年份变成 7772、228200 等乱码）。
         """
         if is_index:
-            return self._api.get_index_bars(cat, market, code, 0, want)
-        return self._api.get_security_bars(cat, market, code, 0, want)
+            return self._api.get_index_bars(cat, market, code, start, want)
+        return self._api.get_security_bars(cat, market, code, start, want)
+
+    def _fetch_paginated(
+        self, cat: int, market: int, code: str, want: int, is_index: bool
+    ) -> list[dict]:
+        """分页拉取 K 线，突破 pytdx 单次 800 条限制。
+
+        pytdx 的 get_security_bars / get_index_bars 单次最多返回 800 条。
+        信号引擎通常需要 ≥3000 条历史数据，因此按 800/页分页拉取，
+        通过递增 start 偏移量逐页索取，最后按 datetime 去重合并。
+        """
+        PAGE = 800
+        all_raw: list[dict] = []
+        seen_dt: set[str] = set()
+        remaining = want
+        offset = 0
+
+        with self._lock:
+            self.connect()
+            while remaining > 0:
+                page_size = min(remaining, PAGE)
+                try:
+                    raw = self._fetch_raw(cat, market, code, page_size, is_index, start=offset)
+                except Exception:
+                    # 连接可能失效，重连一次
+                    self._api = None
+                    self.connect()
+                    raw = self._fetch_raw(cat, market, code, page_size, is_index, start=offset)
+
+                if not raw:
+                    break  # 服务器无更多数据
+
+                # 按 datetime 去重（不同页可能重叠）
+                new_count = 0
+                for r in raw:
+                    dt = str(r.get("datetime", ""))
+                    if dt and dt not in seen_dt:
+                        seen_dt.add(dt)
+                        all_raw.append(r)
+                        new_count += 1
+
+                if new_count == 0:
+                    break  # 全部重复，已拉完
+
+                offset += len(raw)
+                remaining -= len(raw)
+
+                # 如果本页返回不足 page_size，说明服务器数据已到尽头
+                if len(raw) < page_size:
+                    break
+
+        return all_raw
 
     def fetch_bars(
         self, symbol: str, timeframe: str, n: int, drop_forming: bool = True
@@ -160,22 +229,15 @@ class TongdaxinSource(DataSource):
             raise DataSourceUnavailable(f"通达信不支持周期 {timeframe}")
         market, code = _parse_market(symbol)
         cat = _CAT[timeframe]
-        want = min(max(n + 2, 20), 800)  # 单次上限 800
+        want = max(n + 2, 20)  # 不再截断到 800，由 _fetch_paginated 分页拉取
         is_index = _is_index(market, code)
 
-        with self._lock:
-            self.connect()
-            try:
-                raw = self._fetch_raw(cat, market, code, want, is_index)
-            except Exception:
-                # 连接可能失效，重连一次
-                self._api = None
-                self.connect()
-                raw = self._fetch_raw(cat, market, code, want, is_index)
+        raw = self._fetch_paginated(cat, market, code, want, is_index)
 
         if not raw:
             raise DataSourceUnavailable(
-                f"通达信无数据：{symbol}。请确认代码正确；指数需带 sh/sz 前缀（如 sh000001）。"
+                f"通达信无数据：{symbol}（market={market}, code={code}）。"
+                f"请确认代码正确；指数需带 sh/sz 前缀（如 sh000001）。"
             )
         if _looks_corrupted(raw):
             # 数据乱码通常意味着接口选错（指数误用股票接口）或代码/市场不匹配。
