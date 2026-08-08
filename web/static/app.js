@@ -2795,13 +2795,15 @@ function initAutopilotOnce() {
   if (apInitDone) return;
   apInitDone = true;
   $("apBrowseStrategyBtn").addEventListener("click", browseAutopilotStrategy);
+  const apStrategySelect = $("apStrategySelect");
+  if (apStrategySelect) apStrategySelect.addEventListener("change", onApStrategyChange);
   $("apStartBtn").addEventListener("click", startAutopilot);
   $("apStopBtn").addEventListener("click", stopAutopilot);
   const apResetBtn = $("apResetBtn");
   if (apResetBtn) apResetBtn.addEventListener("click", resetAutopilot);
   // 从已保存设置恢复模式/品种/周期
   fetchJSON("/api/settings", { silent: true })
-    .then((s) => {
+    .then(async (s) => {
       if (s && s.autopilot_mode) $("apMode").value = s.autopilot_mode;
       if (s && s.autopilot_symbol) $("apSymbol").value = s.autopilot_symbol;
       if (s && s.autopilot_timeframe) $("apTimeframe").value = s.autopilot_timeframe;
@@ -2810,6 +2812,7 @@ function initAutopilotOnce() {
         renderAutopilotStrategyCard(apStrategyFile);
         updateApStartBtn();
       }
+      await populateApStrategySelect();  // 填充下拉，并按 apStrategyFile 预选
     })
     .catch(() => {});
 }
@@ -2848,6 +2851,12 @@ function renderAutopilotStrategyCard(sf) {
 async function browseAutopilotStrategy() {
   try {
     const res = await fetchJSON("/api/strategy-file/browse", { silent: true });
+    if (res && res.native_picker === false) {
+      // headless：原生选框不可用——隐藏按钮，引导用下拉
+      const btn = $("apBrowseStrategyBtn");
+      if (btn) btn.style.display = "none";
+      return;
+    }
     if (res && res.strategy_file) {
       apStrategyFile = res.strategy_file;
       renderAutopilotStrategyCard(apStrategyFile);
@@ -2857,6 +2866,36 @@ async function browseAutopilotStrategy() {
   } catch (e) {
     showErrorPopup("选择策略失败", e.message);
   }
+}
+
+async function populateApStrategySelect() {
+  // headless 友好：从 /api/strategies 列表填充下拉（替代弹不了的本地原生选框）
+  const sel = $("apStrategySelect");
+  if (!sel) return;
+  let rows = [];
+  try {
+    const data = await fetchJSON("/api/strategies", { silent: true });
+    rows = (data && data.strategies) || [];
+  } catch (_) {}
+  const opts = ['<option value="">— 选择已保存策略 —</option>'];
+  rows.forEach((r) => {
+    const score = r.best_score != null ? Number(r.best_score).toFixed(3) : "—";
+    const tf = r.timeframe ? ` ${r.timeframe}` : "";
+    opts.push(
+      `<option value="${escHtml(r.path)}">${escHtml(r.symbol || "?")}${tf} · 分数 ${score}</option>`
+    );
+  });
+  const prev = apStrategyFile || sel.value;
+  sel.innerHTML = opts.join("");
+  if (prev) sel.value = prev;  // 命中则预选（apStrategyFile 来自已保存设置）
+}
+
+function onApStrategyChange() {
+  const sel = $("apStrategySelect");
+  apStrategyFile = sel ? sel.value : "";
+  renderAutopilotStrategyCard(apStrategyFile);
+  updateApStartBtn();
+  if (apStrategyFile) saveApSetting({ autopilot_last_strategy: apStrategyFile });
 }
 
 function updateApStartBtn() {

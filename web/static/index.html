@@ -566,6 +566,9 @@
       <h2>自动驾驶（第四步）</h2>
       <div class="launch-form launch-form-file">
         <div class="launch-row launch-row-main">
+          <select id="apStrategySelect" style="min-width:240px;max-width:60%" title="从已保存的策略中选（headless 服务器用这个；本机桌面也可点「选择策略」弹框）">
+            <option value="">— 选择已保存策略 —</option>
+          </select>
           <button type="button" class="btn btn-secondary btn-browse" id="apBrowseStrategyBtn">选择策略</button>
           <div class="data-file-card" id="apStrategyCard">
             <div class="data-file-empty">尚未选择策略文件（第一步挖出的 best_*.json）</div>

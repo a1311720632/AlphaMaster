@@ -198,8 +198,9 @@ def _browse_data_file() -> dict[str, Any]:
     try:
         path = pick_parquet_file()
     except Exception as exc:
-        log_error("File picker failed", exc)
-        raise HTTPException(500, f"文件选择失败: {exc}") from exc
+        # headless（无 tkinter / 无 DISPLAY）：当作取消 + 标记，前端转下拉选择
+        log_error("File picker unavailable (headless?)", exc)
+        return {"ok": False, "cancelled": True, "native_picker": False}
 
     if not path:
         if is_debug_mode():
@@ -257,8 +258,9 @@ def _browse_strategy_file() -> dict[str, Any]:
     try:
         path = pick_strategy_file()
     except Exception as exc:
-        log_error("Strategy file picker failed", exc)
-        raise HTTPException(500, f"文件选择失败: {exc}") from exc
+        # headless（无 tkinter / 无 DISPLAY）：当作取消 + 标记，前端转下拉选择
+        log_error("Strategy file picker unavailable (headless?)", exc)
+        return {"ok": False, "cancelled": True, "native_picker": False}
 
     if not path:
         if is_debug_mode():
