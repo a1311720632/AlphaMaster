@@ -1,0 +1,27 @@
+# AlphaMaster 服务器端精简依赖（paper autopilot + web 控制台）
+#
+# torch 单独用 CPU index 装（强制 CPU wheel，避免 Linux 上默认拉 CUDA ~2GB OOM）：
+#     pip install --index-url https://download.pytorch.org/whl/cpu torch
+#
+# 这里**故意排除**（web 启动时不导入，或 Linux 上装不了）：
+#   MetaTrader5   — Windows-only，Debian 上 pip 必失败（代码在 config.py 已 stub）
+#   tvdatafeed    — git+https VCS 安装，OKX paper 用不到
+#   tushare/pytdx/tqsdk — 国内数据源，未用
+#   matplotlib/seaborn  — 仅 research（requirements-optional.txt）
+#   playwright    — 浏览器自动化，未用
+#   pytest/hypothesis — 测试
+
+numpy
+scipy
+pandas
+pyarrow
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+pydantic>=2.0.0
+cryptography
+python-dotenv
+loguru
+tqdm
+requests
+ccxt>=4.0.0   # paper 不用；升 testnet/live 时省一次装

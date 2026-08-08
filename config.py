@@ -220,7 +220,9 @@ class Config:
     # 小于该名义 delta 不下单（避免微小调仓刷手续费）；0=只要 delta≠0 就调
     AUTOPILOT_MIN_NOTIONAL_DELTA = 0.0
     # 运营熔断（ADR-0005）：破坏奇偶性的硬开关，为运营安全有意为之
-    AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT = -0.10   # 从峰值权益起算回撤 ≤ 该值 → 全平+停
+    AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT = float(
+        os.getenv("AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT", "-0.10")
+    )   # 从峰值权益起算回撤 ≤ 该值 → 全平+停；env 可覆盖（服务器设 -2.0 = 永不可达 = off）
     AUTOPILOT_BREAKER_MAX_BARS_STALE   = 3       # 连续 N 次 行情/持仓 拉取失败 → 停
 
     # ── 文件路径 ──────────────────────────────────────────

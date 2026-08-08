@@ -31,6 +31,9 @@ _DEFAULT = {
     "autopilot_last_strategy": "",
     "autopilot_symbol": "",
     "autopilot_timeframe": "",
+    # β 自动续命：标记"用户意图上想让 autopilot 一直跑"。web 重启后据此决定是否
+    # 从 autopilot_last_strategy/mode/symbol/timeframe 重拉。stop/reset 置 False。
+    "autopilot_intended_running": False,
 }
 
 
@@ -150,6 +153,7 @@ def load_settings() -> dict:
     out["feishu_secret"] = str(out.get("feishu_secret") or "").strip()
     out["tqsdk_user"] = str(out.get("tqsdk_user") or "").strip()
     out["tqsdk_password"] = str(out.get("tqsdk_password") or "").strip()
+    out["autopilot_intended_running"] = bool(out.get("autopilot_intended_running", False))
     recovered = _recover_last_data_file(out)
     if recovered != out.get("last_data_file") and _is_production_settings_path():
         out["last_data_file"] = recovered
@@ -235,6 +239,8 @@ def save_settings(data: dict) -> dict:
         current["autopilot_symbol"] = str(data["autopilot_symbol"] or "").strip()
     if "autopilot_timeframe" in data:
         current["autopilot_timeframe"] = str(data["autopilot_timeframe"] or "").strip()
+    if "autopilot_intended_running" in data:
+        current["autopilot_intended_running"] = bool(data["autopilot_intended_running"])
     SETTINGS_PATH.write_text(
         json.dumps(current, indent=2, ensure_ascii=False),
         encoding="utf-8",

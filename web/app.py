@@ -1019,6 +1019,23 @@ def _startup_realtime() -> None:
         log_error("realtime load_persisted failed", exc)
 
 
+@app.on_event("startup")
+def _startup_autopilot_relaunch() -> None:
+    # β：web 启动时若 autopilot_intended_running=True，从持久化设置重拉 autopilot
+    try:
+        autopilot_manager.relaunch_if_intended()
+    except Exception as exc:  # noqa: BLE001
+        log_error("autopilot boot relaunch handler failed", exc)
+
+
+@app.on_event("shutdown")
+def _shutdown_autopilot_watcher() -> None:
+    try:
+        autopilot_manager.shutdown()
+    except Exception as exc:  # noqa: BLE001
+        log_error("autopilot watcher shutdown failed", exc)
+
+
 @app.get("/api/realtime/sources")
 def api_realtime_sources() -> dict[str, Any]:
     return {"sources": list_sources(), "min_exposure": min_exposure()}
@@ -1234,7 +1251,8 @@ def api_autopilot_start(req: StartAutopilotRequest) -> dict[str, Any]:
     if not sf:
         raise HTTPException(400, "缺少 strategy_file")
     save_settings({"autopilot_mode": req.mode, "autopilot_last_strategy": sf,
-                   "autopilot_symbol": req.symbol or "", "autopilot_timeframe": req.timeframe or ""})
+                   "autopilot_symbol": req.symbol or "", "autopilot_timeframe": req.timeframe or "",
+                   "autopilot_intended_running": True})
     try:
         job = autopilot_manager.start(
             strategy_file=sf,
@@ -1249,6 +1267,11 @@ def api_autopilot_start(req: StartAutopilotRequest) -> dict[str, Any]:
 
 @app.post("/api/autopilot/stop")
 def api_autopilot_stop() -> dict[str, Any]:
+    # 先落"不再意图运行"标志（β），再停——保证 web 重启后不会把它再拉起来
+    try:
+        save_settings({"autopilot_intended_running": False})
+    except Exception:  # noqa: BLE001
+        pass
     stopped = autopilot_manager.stop()
     return {"ok": stopped, "autopilot": autopilot_manager.status()}
 
@@ -1256,6 +1279,10 @@ def api_autopilot_stop() -> dict[str, Any]:
 @app.post("/api/autopilot/reset")
 def api_autopilot_reset() -> dict[str, Any]:
     """一键清除：停止自动驾驶 + 删 autopilot_state.json（历史/成交/权益全清，回初始）。"""
+    try:
+        save_settings({"autopilot_intended_running": False})
+    except Exception:  # noqa: BLE001
+        pass
     result = autopilot_manager.reset()
     return {"ok": True, **result, "autopilot": autopilot_manager.status()}
 

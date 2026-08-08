@@ -1,0 +1,37 @@
+# AlphaMaster web 控制台（autopilot paper，β 自动续命）
+# 单 unit：β 下 web 进程拥有 autopilot 子进程（os.environ.copy() 把本 unit 的 env 传给子进程）。
+#
+# 安装：
+#   sudo cp deploy/alphamaster-web.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now alphamaster-web
+#
+# 日志：journalctl -u alphamaster-web -f
+# 重启（β 会按 autopilot_intended_running 自动重拉 autopilot）：sudo systemctl restart alphamaster-web
+
+[Unit]
+Description=AlphaMaster web console (autopilot paper, beta-supervised)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alphamaster
+Group=alphamaster
+WorkingDirectory=/srv/alphamaster
+
+# 子进程（run_autopilot.py）经 os.environ.copy() 继承这些 env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONUTF8=1
+Environment=PYTHONIOENCODING=utf-8
+Environment=AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT=-2.0
+Environment=KLINE_CACHE_DIR=/srv/alphamaster/kline_cache
+
+ExecStart=/srv/alphamaster/venv/bin/python -u run_web.py --host 127.0.0.1 --port 8765
+
+Restart=always
+RestartSec=5
+# 默认 KillMode=control-group：restart/stop 时连 autopilot 子进程一起收，β 开机再重拉（自洽）
+
+[Install]
+WantedBy=multi-user.target
