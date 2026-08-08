@@ -24,6 +24,8 @@ class BarRecord:
     peak_equity: float
     drawdown_pct: float
     alerts: list[str] = field(default_factory=list)
+    entry_price: float = 0.0        # 当前持仓开仓均价（展示用；paper 由 SimBackend 跟踪）
+    unrealized_pnl: float = 0.0     # 截至本 bar 收盘的未实现盈亏（带方向名义口径）
 
 
 @dataclass
@@ -36,6 +38,8 @@ class AutopilotState:
     breaker_tripped: bool = False
     breaker_reason: str = ""
     history: list[dict[str, Any]] = field(default_factory=list)
+    start_equity: float = 0.0      # 总收益基线：paper=起点权益，live=首次余额快照
+    trades: list[dict[str, Any]] = field(default_factory=list)  # 成交(fill)流水
 
     def record(self, rec: BarRecord) -> None:
         self.history.append(asdict(rec))
@@ -44,6 +48,12 @@ class AutopilotState:
         if len(self.history) > _MAX_HISTORY:
             # 保留最近 _MAX_HISTORY 条，避免无限增长
             self.history = self.history[-_MAX_HISTORY:]
+
+    def record_trade(self, t: dict[str, Any]) -> None:
+        """追加一条成交(fill)记录，与 history 同样 cap 在 _MAX_HISTORY。"""
+        self.trades.append(t)
+        if len(self.trades) > _MAX_HISTORY:
+            self.trades = self.trades[-_MAX_HISTORY:]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -59,6 +69,8 @@ class AutopilotState:
             breaker_tripped=bool(d.get("breaker_tripped", False)),
             breaker_reason=str(d.get("breaker_reason", "")),
             history=list(d.get("history", [])),
+            start_equity=float(d.get("start_equity", 0.0)),
+            trades=list(d.get("trades", [])),
         )
 
     def save(self, path: str | Path) -> None:

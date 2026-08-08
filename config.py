@@ -216,7 +216,7 @@ class Config:
     AUTOPILOT_EXCHANGE        = os.getenv("AUTOPILOT_EXCHANGE", "okx")
     # 喂特征引擎的历史 bar 数（OKXSource 单次请求上限 300；足以预热最长特征 lookback）
     AUTOPILOT_LOOKBACK_BARS   = 300
-    AUTOPILOT_PAPER_START_EQUITY = 1.0   # paper 模式模拟权益起点
+    AUTOPILOT_PAPER_START_EQUITY = 10000.0   # paper 模式模拟权益起点（USDT）
     # 小于该名义 delta 不下单（避免微小调仓刷手续费）；0=只要 delta≠0 就调
     AUTOPILOT_MIN_NOTIONAL_DELTA = 0.0
     # 运营熔断（ADR-0005）：破坏奇偶性的硬开关，为运营安全有意为之

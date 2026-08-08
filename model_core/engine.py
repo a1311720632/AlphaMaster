@@ -1286,7 +1286,8 @@ class AlphaEngine:
     def save_checkpoint(self, step: int, path: str | None = None) -> str:
         _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
         if path is None:
-            sym_tag = f"_{self.target_symbol}" if self.target_symbol else ""
+            tf_tag = f"_{self.timeframe}" if getattr(self, "timeframe", "") else ""
+            sym_tag = f"_{self.target_symbol}{tf_tag}" if self.target_symbol else ""
             path = str(_CHECKPOINT_DIR / f"ckpt{sym_tag}_step_{step:04d}.pt")
         ckpt = {
             "step":                 step,

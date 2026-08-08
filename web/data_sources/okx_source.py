@@ -140,3 +140,11 @@ class OKXSource(DataSource):
             if len(newest) <= 8 or str(newest[8]) == "0":
                 bars = bars[:-1]
         return bars[-n:]
+
+    def fetch_ticker(self, symbol: str) -> float:
+        """最新成交价（公开 /market/ticker，无需凭据；paper/live 通用）。"""
+        inst_id = _normalize_inst_id(symbol)
+        data = _okx_get("/api/v5/market/ticker", {"instId": inst_id}, retries=2)
+        if not data:
+            raise DataSourceUnavailable(f"OKX 无 ticker：{symbol}")
+        return float(data[0]["last"])

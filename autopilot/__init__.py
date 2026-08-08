@@ -4,6 +4,11 @@
 （连续 tanh 仓位，无单笔 SL/TP），三模式（paper/testnet/live）共享同一信号核心，
 仅执行后端不同。
 """
-from autopilot.strategy_loader import StrategySpec, StrategyLoadError, load_strategy
+from autopilot.strategy_loader import (
+    StrategySpec,
+    StrategyLoadError,
+    load_strategy,
+    normalize_timeframe,
+)
 
-__all__ = ["StrategySpec", "StrategyLoadError", "load_strategy"]
+__all__ = ["StrategySpec", "StrategyLoadError", "load_strategy", "normalize_timeframe"]

@@ -167,3 +167,117 @@ def test_engine_drawdown_halt_flattens(tmp_path):
     assert "回撤" in reason
     assert be.flattened  # 熔断触发时调用了 flatten_all
     assert eng.state.breaker_tripped
+
+
+def test_simbackend_entry_weighted_average():
+    """SimBackend 移动加权开仓价：开仓→同向加仓加权→减仓不穿零不变→穿零重置。"""
+    from autopilot.backends import SimBackend
+
+    b = SimBackend(start_equity=10000.0, cost_rate=0.0)
+    b.mark_to_market(0, 100.0)              # 初始化 _last_close=100
+    b.place_delta_order("BTC", 1000.0)      # 开多 entry=100
+    assert b._entry_price == pytest.approx(100.0)
+    b.mark_to_market(100.0, 120.0)
+    b.place_delta_order("BTC", 800.0)       # 同向加仓 → 加权
+    assert b._entry_price == pytest.approx((1000 * 100 + 800 * 120) / 1800)
+    b.mark_to_market(120.0, 110.0)
+    b.place_delta_order("BTC", -1000.0)     # 减仓不穿零 → entry 不变
+    assert b._entry_price == pytest.approx((1000 * 100 + 800 * 120) / 1800)
+    b.mark_to_market(110.0, 130.0)
+    b.place_delta_order("BTC", -1500.0)     # 穿零 → entry 重置为 fill
+    assert b._entry_price == pytest.approx(130.0)
+    assert b._position_notional == pytest.approx(-700.0)
+
+
+def test_engine_records_entry_unrealized_and_trades(tmp_path):
+    """paper 端到端：history 含 entry_price/unrealized_pnl；start_equity=起点；trades 落地。"""
+    from autopilot.backends import SimBackend
+
+    be = SimBackend(start_equity=1.0, cost_rate=0.0003)
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=3)
+    eng.run_forever()
+
+    assert eng.state.start_equity == pytest.approx(1.0)  # paper 起点权益
+    for rec in eng.state.history:
+        assert rec["entry_price"] >= 0
+        assert rec["unrealized_pnl"] == pytest.approx(rec["unrealized_pnl"])  # finite
+    # min_delta=0 → 每根调仓 bar 都有 fill（除非 target 恒为 0）；trades 是 list
+    assert isinstance(eng.state.trades, list)
+    for t in eng.state.trades:
+        assert t["side"] in ("buy", "sell")
+        assert t["action"] in ("开仓", "加仓", "减仓", "平仓", "反手")
+        for k in ("filled_notional", "price", "fee", "pos_before", "pos_after", "entry"):
+            assert k in t, f"trade 缺字段 {k}: {t}"
+
+
+def test_engine_first_tick_initializes_last_close(tmp_path):
+    """首根 tick：mark_to_market(cur,cur) 初始化 _last_close；但首根【不调仓】（等下根收盘）。"""
+    from autopilot.backends import SimBackend
+
+    be = SimBackend(start_equity=1.0, cost_rate=0.0)
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=1)
+    eng.run_forever()
+    # 首根 mark 跑了 → _last_close 就绪；但首根不调仓 → 持仓为 0、无成交
+    assert be._last_close > 0
+    assert abs(be._position_notional) < 1e-9  # 首根不进场
+    assert len(eng.state.trades) == 0
+
+
+def test_engine_resume_initializes_last_close(tmp_path):
+    """恢复 state 后首根 tick：_last_close 被初始化（>0），不卡在 0。
+
+    regression: 恢复时 is_first=False 且 _prev_close=NaN，旧代码两个 mark 分支都不走，
+    导致 _last_close 保持 __init__ 的 0 → 首条成交价=0、entry 卡 0、未实现盈亏失真。
+    """
+    from autopilot.backends import SimBackend
+
+    # 第一次跑产生 state
+    be1 = SimBackend(start_equity=1.0, cost_rate=0.0)
+    eng1 = _make_engine(tmp_path, FakeSource(_pool()), be1, max_bars=1)
+    eng1.run_forever()
+    assert (tmp_path / "autopilot_state.json").exists()
+    # 恢复：新 backend（_last_close=0, _prev_close=NaN）；max_bars 要 > 已恢复 history 长度
+    # 注：恢复后进程首根新 bar 也不调仓（_first_tick），max_bars=3 让第 2 根新 bar 调仓
+    be2 = SimBackend(start_equity=1.0, cost_rate=0.0)
+    eng2 = _make_engine(tmp_path, FakeSource(_pool()), be2, max_bars=3)
+    eng2.run_forever()
+    # 恢复后首根 mark(cur,cur) 被调 → _last_close>0；若有调仓，fill 价/entry 也非 0
+    assert be2._last_close > 0
+    for t in eng2.state.trades:
+        assert t["price"] > 0, f"恢复首根 fill 价为 0: {t}"
+
+
+def test_classify_action():
+    """动作分类：开仓/加仓/减仓/平仓/反手（成交记录校验开平仓逻辑的基础）。"""
+    from autopilot.engine import _classify_action
+
+    assert _classify_action(0.0, 1000.0) == "开仓"       # 空仓 → 多
+    assert _classify_action(0.0, -1000.0) == "开仓"      # 空仓 → 空
+    assert _classify_action(1000.0, 0.0) == "平仓"       # 多 → 空仓
+    assert _classify_action(-1000.0, 0.0) == "平仓"      # 空 → 空仓
+    assert _classify_action(1000.0, 1800.0) == "加仓"    # 同向增大
+    assert _classify_action(-1000.0, -1800.0) == "加仓"  # 空同向增大
+    assert _classify_action(1000.0, 500.0) == "减仓"     # 同向减小
+    assert _classify_action(-1000.0, -500.0) == "减仓"   # 空同向减小
+    assert _classify_action(1000.0, -500.0) == "反手"    # 穿零
+    assert _classify_action(-1000.0, 500.0) == "反手"    # 穿零
+
+
+def test_realized_pnl():
+    """实现盈亏：开仓/加仓=0；减仓/平仓/反手=平仓量×sign(before)×(fill/entry_before−1)。"""
+    from autopilot.engine import _realized_pnl
+
+    # 开仓（before=0）→ 0
+    assert _realized_pnl(0.0, 1000.0, 120.0, 0.0) == 0.0
+    # 加仓（同向）→ 0
+    assert _realized_pnl(1000.0, 500.0, 120.0, 100.0) == 0.0
+    # 多头减仓：fill>entry 盈利
+    assert _realized_pnl(1000.0, -400.0, 120.0, 100.0) == pytest.approx(80.0)
+    # 空头减仓：fill<entry 盈利（低价买回）
+    assert _realized_pnl(-1000.0, 400.0, 80.0, 100.0) == pytest.approx(80.0)
+    # 多头全平
+    assert _realized_pnl(1000.0, -1000.0, 110.0, 100.0) == pytest.approx(100.0)
+    # 反手（多→空）：平掉整个 before，用调仓前均价
+    assert _realized_pnl(1000.0, -1500.0, 110.0, 100.0) == pytest.approx(100.0)
+    # entry 缺失 → 0（防 ZeroDivision）
+    assert _realized_pnl(1000.0, -400.0, 120.0, 0.0) == 0.0

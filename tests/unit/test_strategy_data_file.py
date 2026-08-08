@@ -19,7 +19,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(progress_mod, "STRATEGIES_DIR", strategies)
     monkeypatch.setattr(sf, "STRATEGIES_DIR", strategies)
-    monkeypatch.setattr(sf, "checkpoint_glob", lambda _symbol: [])
+    monkeypatch.setattr(sf, "checkpoint_glob", lambda _symbol, timeframe="": [])
     import web.settings as settings_mod
 
     monkeypatch.setattr(settings_mod, "SETTINGS_PATH", settings_path)

@@ -215,13 +215,15 @@
       <span class="hud-corner bl"></span><span class="hud-corner br"></span>
       <h2>已保存策略</h2>
       <div class="table-wrap">
-        <table>
+        <table class="bt-table">
           <thead>
             <tr>
               <th>品种</th>
               <th>周期</th>
+              <th>步数</th>
               <th>分数</th>
               <th>公式</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="strategiesBody"></tbody>
@@ -587,8 +589,40 @@
         <div class="launch-actions" role="group" aria-label="自动驾驶操作">
           <button class="btn btn-primary" id="apStartBtn" disabled>启动</button>
           <button class="btn btn-danger" id="apStopBtn" disabled>停止</button>
+          <button class="btn btn-secondary" id="apResetBtn" title="停止自动驾驶并清空所有历史记录，权益回到初始">一键清除</button>
         </div>
         <small class="field-hint">连续仓位·对齐回测（无单笔止盈止损）；testnet/live 需 <code>ccxt</code> + OKX 凭据（见 <code>.env</code>）。停机靠账户级回撤/断网熔断。</small>
+      </div>
+    </section>
+
+    <section class="panel chart-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head">
+        <h2>持仓与收益</h2>
+        <span class="hint" id="apTotalReturnHint">初始资金 10000 USDT</span>
+      </div>
+      <div id="apTotalRow" style="display:flex;align-items:center;gap:14px;padding:6px 4px 16px;flex-wrap:wrap;">
+        <span style="opacity:.7;font-size:13px;">总收益</span>
+        <span id="apTotalPct" class="metric-value" style="font-size:26px;font-weight:700;">—</span>
+        <span id="apTotalAbs" style="font-size:14px;opacity:.85;">—</span>
+        <span id="apTotalSpark" style="margin-left:auto;"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="bt-table">
+          <thead>
+            <tr>
+              <th>方向</th>
+              <th>仓位</th>
+              <th>均价</th>
+              <th>现价</th>
+              <th>未实现盈亏</th>
+            </tr>
+          </thead>
+          <tbody id="apPositionBody">
+            <tr class="empty-row"><td colspan="5">等待启动…</td></tr>
+          </tbody>
+        </table>
       </div>
     </section>
 
@@ -619,6 +653,35 @@
         <pre class="log-view" id="apLogView">等待启动…</pre>
       </section>
     </div>
+
+    <section class="panel bt-table-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head">
+        <h2>成交记录</h2>
+        <span class="hint" id="apFillsHint">—</span>
+      </div>
+      <div class="table-wrap">
+        <table class="bt-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>动作</th>
+              <th>方向</th>
+              <th>价格</th>
+              <th>调整名义</th>
+              <th>调整后持仓</th>
+              <th>开仓均价</th>
+              <th>实现盈亏</th>
+              <th>手续费</th>
+            </tr>
+          </thead>
+          <tbody id="apFillsBody">
+            <tr class="empty-row"><td colspan="9">暂无成交</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
     </div><!-- /page-autopilot -->
 
     <div class="modal" id="rtFeishuHelpModal" hidden>

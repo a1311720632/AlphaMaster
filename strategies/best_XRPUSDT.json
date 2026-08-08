@@ -15,5 +15,6 @@
   "formula_decoded": "DMI_ADX_14 → RSI14 → TS_MIN_10 → DELAY1 → MUL → MAX3 → MOMENTUM_10 → TS_ARG_MAX_5",
   "train_step": 0,
   "timeframe": "H1",
+  "data_file": "D:\\code\\自动挖掘因子项目\\OKX_K线数据\\OKX_K线数据\\XRPUSDT_H1.parquet",
   "mode": "parquet_file"
 }

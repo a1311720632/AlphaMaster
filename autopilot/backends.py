@@ -30,6 +30,8 @@ class OrderResult:
     ok: bool
     filled_notional: float = 0.0
     message: str = ""
+    price: float = 0.0   # 成交价（paper=当根收盘，live=ticker）
+    fee: float = 0.0     # 手续费（paper=|delta|×cost_rate；live 占位 0.0）
 
 
 class ExecutionBackend(ABC):
@@ -44,6 +46,14 @@ class ExecutionBackend(ABC):
     @abstractmethod
     def fetch_position_notional(self, symbol: str) -> float:
         """当前持仓的带方向名义（多+ / 空-）。ADR-0006：以交易所实际持仓为准。"""
+
+    def fetch_position_detail(self, symbol: str) -> tuple[float, float, float]:
+        """当前持仓明细：(带方向名义, 开仓均价, 未实现盈亏)。
+
+        默认实现只给名义（开仓价/未实现盈亏=0）；SimBackend/OKXBackend 各自 override。
+        engine 用它一次性取齐 BarRecord 的 entry/unrealized，避免多次拉取。
+        """
+        return (self.fetch_position_notional(symbol), 0.0, 0.0)
 
     @abstractmethod
     def place_delta_order(self, symbol: str, delta_notional: float) -> OrderResult:
@@ -79,6 +89,8 @@ class SimBackend(ExecutionBackend):
         self._equity = float(start_equity)
         self._cost_rate = float(cost_rate)
         self._position_notional = 0.0  # 带方向名义（多+ / 空-）
+        self._last_close = 0.0         # 最近 mark_to_market 的收盘价，作 place_delta 的 fill 价
+        self._entry_price = 0.0        # 当前持仓移动加权开仓均价（≥0 的 magnitude）
 
     def fetch_equity(self) -> float:
         return self._equity
@@ -86,8 +98,22 @@ class SimBackend(ExecutionBackend):
     def fetch_position_notional(self, symbol: str) -> float:
         return self._position_notional
 
+    def fetch_position_detail(self, symbol: str) -> tuple[float, float, float]:
+        """(带方向名义, 开仓均价, 截至最近收盘的未实现盈亏)。
+
+        未实现盈亏用与 mark_to_market 一致的收益率口径 pos×(close/entry−1)；
+        entry/close 未就绪返回 0.0，避免 ZeroDivision。
+        """
+        if self._entry_price > 0 and self._last_close > 0:
+            unreal = self._position_notional * (self._last_close / self._entry_price - 1.0)
+        else:
+            unreal = 0.0
+        return (self._position_notional, self._entry_price, unreal)
+
     def mark_to_market(self, prev_close: float, cur_close: float) -> float:
         """上一期持仓（= 上期 target）× close-to-close 收益 → 计入权益。"""
+        if cur_close > 0:
+            self._last_close = float(cur_close)  # 供 place_delta_order 作 fill 价
         if prev_close <= 0 or cur_close <= 0:
             return 0.0
         ret = cur_close / prev_close - 1.0
@@ -99,8 +125,39 @@ class SimBackend(ExecutionBackend):
         # paper 全额成交（无部分成交/滑点）；成本按名义 × cost_rate 扣权益
         cost = abs(delta_notional) * self._cost_rate
         self._equity -= cost
+        fill_price = self._last_close
+        self._update_entry(delta_notional, fill_price)  # 用更新前的 _position_notional
         self._position_notional += delta_notional
-        return OrderResult(ok=True, filled_notional=delta_notional, message="sim fill")
+        return OrderResult(
+            ok=True, filled_notional=delta_notional, price=fill_price, fee=cost,
+            message="sim fill",
+        )
+
+    def _update_entry(self, delta_notional: float, fill_price: float) -> None:
+        """移动加权更新开仓均价。
+
+        _entry_price 始终是 ≥0 的 magnitude，方向由 _position_notional 的符号体现。
+        开仓→fill；同向加仓→名义加权；减仓不穿零→不变；穿零/翻向→fill；平到空仓→0。
+        fill_price<=0（首根 tick 未初始化等防御）→ 跳过加权保持原值。
+        """
+        if fill_price <= 0:
+            return
+        old = self._position_notional
+        new = old + delta_notional
+        if new == 0:
+            self._entry_price = 0.0
+        elif old == 0:
+            self._entry_price = fill_price
+        elif (new > 0) == (old > 0):
+            if (delta_notional > 0) == (old > 0):
+                # 同向加仓 → 名义加权
+                self._entry_price = (
+                    abs(old) * self._entry_price + abs(delta_notional) * fill_price
+                ) / (abs(old) + abs(delta_notional))
+            # 反向减仓不穿零 → entry 不变
+        else:
+            # 穿零/翻向 → 新方向以 fill 重新计
+            self._entry_price = fill_price
 
     def flatten_all(self, symbol: str) -> OrderResult:
         return self.place_delta_order(symbol, -self._position_notional)
@@ -229,22 +286,28 @@ class OKXBackend(ExecutionBackend):
             total = (usdt.get("free") or 0.0) + (usdt.get("used") or 0.0)
         return float(total or 0.0)
 
-    def fetch_position_notional(self, symbol: str) -> float:
+    def fetch_position_detail(self, symbol: str) -> tuple[float, float, float]:
+        """(带方向名义, 开仓均价, 未实现盈亏)。未实现盈亏读 ccxt unrealisedPnl（两种拼写都容错）。"""
         ccxt_sym = self._to_ccxt_symbol(symbol)
         try:
             positions = self._ex.fetch_positions([ccxt_sym])  # type: ignore[union-attr]
         except Exception:  # noqa: BLE001
-            return 0.0
+            return (0.0, 0.0, 0.0)
         cs = self._contract_size()
         for p in positions or []:
             if p.get("symbol") != ccxt_sym:
                 continue
             contracts = float(p.get("contracts") or 0.0)
-            ref = p.get("entryPrice") or p.get("markPrice") or 0.0
-            ref = float(ref) or 0.0
+            entry = float(p.get("entryPrice") or 0.0)
+            ref = entry or float(p.get("markPrice") or 0.0) or 0.0
             notional = contracts * ref * cs
-            return -notional if p.get("side") == "short" else notional
-        return 0.0
+            notional = -notional if p.get("side") == "short" else notional
+            unreal = float(p.get("unrealizedPnl") or p.get("unrealisedPnl") or 0.0)
+            return (notional, entry, unreal)
+        return (0.0, 0.0, 0.0)
+
+    def fetch_position_notional(self, symbol: str) -> float:
+        return self.fetch_position_detail(symbol)[0]
 
     def place_delta_order(self, symbol: str, delta_notional: float) -> OrderResult:
         price = self._current_price()
@@ -260,7 +323,7 @@ class OKXBackend(ExecutionBackend):
             return OrderResult(ok=False, filled_notional=0.0, message=f"下单失败: {exc}")
         cs = self._contract_size()
         return OrderResult(
-            ok=True, filled_notional=contracts * price * cs, message="market fill"
+            ok=True, filled_notional=contracts * price * cs, price=price, message="market fill"
         )
 
     def flatten_all(self, symbol: str) -> OrderResult:
@@ -283,7 +346,7 @@ class OKXBackend(ExecutionBackend):
                 self._ex.create_order(self._ccxt_symbol, "market", side, abs(contracts))  # type: ignore[union-attr]
             except Exception as exc2:  # noqa: BLE001
                 return OrderResult(ok=False, message=f"平仓失败: {exc2}")
-        return OrderResult(ok=True, filled_notional=-notional, message="flatten")
+        return OrderResult(ok=True, filled_notional=-notional, price=price, message="flatten")
 
     def close(self) -> None:  # noqa: B027
         pass

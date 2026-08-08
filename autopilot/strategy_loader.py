@@ -17,6 +17,28 @@ class StrategyLoadError(Exception):
     """策略加载失败（文件缺失 / 格式错 / 词表不匹配 / formula 非法）。"""
 
 
+# MT5 风格周期（策略文件里写入，来自 Config.get_timeframe 的键）→ 项目统一规范周期
+# （CANON_TIMEFRAMES，与 web 数据源 / autopilot engine 的 _CADENCE / _TF_SECONDS 对齐）。
+# 训练侧按 MT5 周期记录（H1/M15/D1…），实盘行情源按规范周期识别（1h/15m/1d…）；加载时
+# 归一化一次，下游 engine 与 OKXSource 都拿到能识别的键（否则报「OKX 不支持周期 H1」）。
+_MT5_TO_CANON: dict[str, str] = {
+    "M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m",
+    "H1": "1h", "H4": "4h", "D1": "1d", "W1": "1w", "MN1": "1M",
+}
+
+
+def normalize_timeframe(tf: str) -> str:
+    """把策略文件里的周期字符串归一化为项目规范周期（CANON_TIMEFRAMES）。
+
+    幂等：已是规范周期（如 '1h'）原样返回；MT5 风格（如 'H1' / 'M15'）转 '1h' / '15m'；
+    未知值原样返回，交给数据源自行报「不支持周期」。大小写与首尾空白容错。
+    """
+    if not tf:
+        return ""
+    t = tf.strip()
+    return _MT5_TO_CANON.get(t.upper(), t)
+
+
 @dataclass(frozen=True)
 class StrategySpec:
     formula: list[int]
@@ -67,7 +89,7 @@ def load_strategy(path: str | Path) -> StrategySpec:
     return StrategySpec(
         formula=formula,
         symbol=str(data.get("symbol") or ""),
-        timeframe=str(data.get("timeframe") or ""),
+        timeframe=normalize_timeframe(str(data.get("timeframe") or "")),
         score=float(data.get("best_score") or data.get("train_best_score") or 0.0),
         vocab_version=ver,
         path=str(p),

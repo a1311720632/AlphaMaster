@@ -190,6 +190,41 @@ class AutopilotManager:
                 self._proc.kill()
             return True
 
+    def reset(self) -> dict[str, Any]:
+        """一键清除：停止子进程 + 删除 autopilot_state.json（history/trades/权益记录全清）。
+
+        下次启动 engine 新建 state：paper 权益回到起点（10000），live 重记真实余额。
+        """
+        from config import Config
+
+        with self._lock:
+            stopped = False
+            if self._proc is not None and self._proc.poll() is None:
+                self._stopped_by_user = True
+                try:
+                    self._proc.terminate()
+                except Exception:
+                    self._proc.kill()
+                stopped = True
+            # 等子进程退出，避免它退出前再写回 state
+            if self._proc is not None:
+                try:
+                    self._proc.wait(timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._refresh_state()
+            # 删 state 文件（防越界校验）
+            state_path = (PROJECT_ROOT / Config.AUTOPILOT_STATE_FILE).resolve()
+            deleted = False
+            try:
+                state_path.relative_to(_PROJECT_ROOT_RESOLVED)
+                if state_path.is_file():
+                    state_path.unlink(missing_ok=True)
+                    deleted = True
+            except (ValueError, OSError):
+                pass
+            return {"stopped": stopped, "deleted": deleted}
+
     def tail_log(self, lines: int = 200) -> list[str]:
         with self._lock:
             if not self._job or not self._job.log_path:

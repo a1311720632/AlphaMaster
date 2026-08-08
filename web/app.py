@@ -49,7 +49,7 @@ from web.training_package import build_training_export_zip, import_training_pack
 from web.backtest_manager import backtest_manager
 from web.realtime_manager import realtime_manager
 from web.autopilot_manager import autopilot_manager
-from web.data_sources.factory import list_sources
+from web.data_sources.factory import get_source, list_sources
 from strategy_manager.live_signal import min_exposure
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -139,6 +139,10 @@ class FeishuTestRequest(BaseModel):
     secret: str | None = None
 
 
+class StrategyFileRequest(BaseModel):
+    file: str  # 策略文件名（best_*.json），多周期/多条后 symbol 不再唯一，用文件名定位
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     started = time.perf_counter()
@@ -213,15 +217,19 @@ def _strategy_context() -> dict[str, Any]:
     settings = load_settings()
     data_file = settings.get("last_data_file") or ""
     train_symbol = None
+    train_timeframe = None
     if data_file:
         try:
-            train_symbol = inspect_parquet_file(data_file).get("symbol")
+            info = inspect_parquet_file(data_file)
+            train_symbol = info.get("symbol")
+            train_timeframe = info.get("timeframe")
         except Exception:
             pass
 
     resolved = resolve_strategy_file(
         settings.get("last_strategy_file") or "",
         train_symbol,
+        train_timeframe,
     )
     strategy_info = None
     if resolved:
@@ -623,31 +631,58 @@ def api_strategies() -> dict[str, Any]:
     return {"strategies": list_strategies()}
 
 
-@app.get("/api/strategies/{symbol}/export")
-def api_export_strategy(symbol: str):
+def _resolve_strategy_file_safe(file: str) -> Path | None:
+    """策略文件名安全解析：必须 best_*.json 且落在 STRATEGIES_DIR 内（防路径穿越）。"""
+    from web.progress import STRATEGIES_DIR
+
+    name = Path(file).name  # 剥任何路径前缀，只留文件名
+    if not name.startswith("best_") or not name.endswith(".json"):
+        return None
+    path = (STRATEGIES_DIR / name).resolve()
+    try:
+        path.relative_to(STRATEGIES_DIR.resolve())
+    except ValueError:
+        return None
+    return path if path.is_file() else None
+
+
+@app.post("/api/strategies/export")
+def api_export_strategy(req: StrategyFileRequest):
+    """按文件名导出策略 JSON（多周期/多条后 symbol 不再唯一，用 file 定位）。"""
     import json
 
     from fastapi.responses import Response
 
+    path = _resolve_strategy_file_safe(req.file)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"策略不存在: {req.file}")
     try:
-        payload = get_strategy_for_export(symbol)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    progress = get_symbol_progress(symbol)
-    step = progress.current_step
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=f"读取失败: {exc}") from exc
+    symbol = payload.get("symbol") or path.stem
     score = payload.get("best_score")
-    if score is None:
-        score = progress.strategy_score if progress.strategy_score is not None else progress.best_score
+    step = int(payload.get("trained_step") or payload.get("train_steps") or 0)
     filename = build_strategy_export_filename(symbol, step, score)
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     return Response(
         content=body,
         media_type="application/json; charset=utf-8",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-        },
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.delete("/api/strategies")
+def api_delete_strategy(req: StrategyFileRequest):
+    """删除指定策略文件（按文件名，路径穿越防护）。"""
+    path = _resolve_strategy_file_safe(req.file)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"策略不存在: {req.file}")
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"删除失败: {exc}") from exc
+    return {"ok": True, "strategies": list_strategies()}
 
 
 @app.get("/api/training/{symbol}/export")
@@ -1017,10 +1052,8 @@ def api_realtime_strategies() -> dict[str, Any]:
     rows = []
     for s in list_strategies():
         sym = s.get("symbol")
-        if not sym:
-            continue
-        path = strategy_path_for_symbol(sym)
-        if not path.exists():
+        spath = s.get("path")
+        if not sym or not spath:
             continue
         rows.append(
             {
@@ -1028,7 +1061,7 @@ def api_realtime_strategies() -> dict[str, Any]:
                 "timeframe": s.get("timeframe"),
                 "best_score": s.get("best_score"),
                 "formula_decoded": s.get("formula_decoded"),
-                "strategy_file": str(path.resolve()),
+                "strategy_file": spath,
             }
         )
     return {"strategies": rows}
@@ -1121,8 +1154,31 @@ def api_realtime_feishu_test(req: FeishuTestRequest) -> dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────
 # 自动驾驶 API（第四步：paper / testnet / live）
 # ─────────────────────────────────────────────────────────────────────
+# 实时现价缓存：symbol -> (monotonic_ts, price)。照搬 realtime_manager._bar_cache 的 TTL 套路。
+_ticker_cache: dict[str, tuple[float, float]] = {}
+_TICKER_TTL = 10.0
+
+
+def _get_live_price(symbol: str) -> float | None:
+    """带 TTL 缓存的 OKX 现价（web 层每 ~10s 拉一次；失败返 None 不写缓存）。"""
+    if not symbol:
+        return None
+    now = time.monotonic()
+    cached = _ticker_cache.get(symbol)
+    if cached and (now - cached[0]) < _TICKER_TTL:
+        return cached[1]
+    try:
+        price = float(get_source("okx").fetch_ticker(symbol))  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - ticker 失败不能让 status 端点 500
+        return None
+    if price > 0:
+        _ticker_cache[symbol] = (now, price)
+        return price
+    return None
+
+
 def _autopilot_state_dict() -> dict[str, Any]:
-    """读 autopilot_state.json，回传最新账本条目（target/actual/equity/dd）给前端。"""
+    """读 autopilot_state.json + 叠加实时现价，回传前端展示所需的账本与实时字段。"""
     try:
         from config import Config
         from autopilot.state import AutopilotState
@@ -1131,7 +1187,34 @@ def _autopilot_state_dict() -> dict[str, Any]:
         if not st:
             return {}
         out = st.to_dict()
-        out["last_bar"] = st.history[-1] if st.history else None
+        lb = st.history[-1] if st.history else None
+        out["last_bar"] = lb
+
+        # 实时现价层（决策 #7/#8）：web 层拉 ticker，基于 last_bar 现算浮盈/实时权益。
+        # 两个基准不能混——持仓浮盈用 entry(自开仓)，实时权益增量用 close(自上根收盘)。
+        last_price = _get_live_price(st.symbol) if lb else None
+        out["last_price"] = last_price
+        if lb is not None and last_price is not None:
+            actual = float(lb.get("actual_notional") or 0.0)
+            entry = float(lb.get("entry_price") or 0.0)
+            close = float(lb.get("close") or 0.0)
+            eq = float(lb.get("equity") or 0.0)
+            # 持仓浮盈：自开仓口径（用 entry；entry<=0/空仓→0）
+            out["unrealized_pnl_live"] = (
+                actual * (last_price / entry - 1.0) if entry > 0 else 0.0
+            )
+            # 实时权益：自上根收盘口径（用 close；equity 已 mark 到 close）
+            out["realtime_equity"] = (
+                eq + actual * (last_price / close - 1.0) if close > 0 else eq
+            )
+            se = float(st.start_equity or 0.0)
+            out["realtime_total_return"] = (
+                (out["realtime_equity"] - se) / se if se > 0 else None
+            )
+        else:
+            out["unrealized_pnl_live"] = None
+            out["realtime_equity"] = None
+            out["realtime_total_return"] = None
         return out
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc)}
@@ -1168,6 +1251,13 @@ def api_autopilot_start(req: StartAutopilotRequest) -> dict[str, Any]:
 def api_autopilot_stop() -> dict[str, Any]:
     stopped = autopilot_manager.stop()
     return {"ok": stopped, "autopilot": autopilot_manager.status()}
+
+
+@app.post("/api/autopilot/reset")
+def api_autopilot_reset() -> dict[str, Any]:
+    """一键清除：停止自动驾驶 + 删 autopilot_state.json（历史/成交/权益全清，回初始）。"""
+    result = autopilot_manager.reset()
+    return {"ok": True, **result, "autopilot": autopilot_manager.status()}
 
 
 @app.get("/")

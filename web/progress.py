@@ -21,12 +21,21 @@ def _safe_symbol_tag(symbol: str) -> str:
     return symbol.replace(".", "_")
 
 
-def checkpoint_glob(symbol: str) -> list[Path]:
+def checkpoint_glob(symbol: str, timeframe: str = "") -> list[Path]:
     tag = _safe_symbol_tag(symbol)
-    patterns = [
-        f"ckpt_{symbol}_step_*.pt",
-        f"ckpt_{tag}_step_*.pt",
-    ]
+    if timeframe:
+        # 新格式（带 tf）优先，回退旧格式（无 tf，兼容已训品种）
+        patterns = [
+            f"ckpt_{symbol}_{timeframe}_step_*.pt",
+            f"ckpt_{tag}_{timeframe}_step_*.pt",
+            f"ckpt_{symbol}_step_*.pt",
+            f"ckpt_{tag}_step_*.pt",
+        ]
+    else:
+        patterns = [
+            f"ckpt_{symbol}_step_*.pt",
+            f"ckpt_{tag}_step_*.pt",
+        ]
     found: list[Path] = []
     for pattern in patterns:
         found.extend(CHECKPOINT_DIR.glob(pattern))
@@ -104,14 +113,36 @@ def _decode_formula(tokens: list[int] | None) -> str | None:
         return str(tokens)
 
 
-def _load_strategy(symbol: str) -> dict[str, Any] | None:
-    path = STRATEGIES_DIR / f"best_{symbol}.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+def _load_strategy(symbol: str, timeframe: str = "") -> dict[str, Any] | None:
+    """读该品种（该周期）最高分策略。
+
+    timeframe 非空 → 扫 best_{sym}_{tf}_*.json 取最高分；
+    timeframe 空 → 扫 best_{sym}_*.json（所有周期）取最高分（跨周期，供进度展示）。
+    回退过渡 best_{sym}_{tf}.json / 旧 best_{sym}.json。
+    """
+    pattern = f"best_{symbol}_{timeframe}_*.json" if timeframe else f"best_{symbol}_*.json"
+    best: tuple[float, dict[str, Any]] | None = None
+    for path in STRATEGIES_DIR.glob(pattern):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        score = data.get("best_score")
+        if score is None or not data.get("formula"):
+            continue
+        if best is None or float(score) > best[0]:
+            best = (float(score), data)
+    if best is not None:
+        return best[1]
+    candidates = [STRATEGIES_DIR / f"best_{symbol}_{timeframe}.json"] if timeframe else []
+    candidates.append(STRATEGIES_DIR / f"best_{symbol}.json")
+    for path in candidates:
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return None
+    return None
 
 
 def _pick_training_history(
@@ -130,10 +161,10 @@ def _pick_training_history(
     return file_history if file_n >= ckpt_n else ckpt_history
 
 
-def get_symbol_progress(symbol: str) -> SymbolProgress:
+def get_symbol_progress(symbol: str, timeframe: str = "") -> SymbolProgress:
     train_steps = ModelConfig.TRAIN_STEPS
-    strategy = _load_strategy(symbol)
-    ckpts = checkpoint_glob(symbol)
+    strategy = _load_strategy(symbol, timeframe)
+    ckpts = checkpoint_glob(symbol, timeframe)
 
     current_step = 0
     best_score = None
@@ -193,8 +224,8 @@ def get_symbol_progress(symbol: str) -> SymbolProgress:
     )
 
 
-def get_strategy_for_export(symbol: str) -> dict[str, Any]:
-    data = _load_strategy(symbol)
+def get_strategy_for_export(symbol: str, timeframe: str = "") -> dict[str, Any]:
+    data = _load_strategy(symbol, timeframe)
     if not data:
         raise FileNotFoundError(f"未找到 {symbol} 的策略，请先完成训练")
     out = dict(data)
@@ -229,11 +260,14 @@ def list_strategies() -> list[dict[str, Any]]:
         formula = data.get("formula")
         rows.append({
             "file": path.name,
+            "path": str(path.resolve()),
             "symbol": data.get("symbol") or path.stem.replace("best_", "", 1),
             "timeframe": data.get("timeframe"),
             "best_score": data.get("best_score"),
             "formula_decoded": data.get("formula_decoded") or _decode_formula(formula),
             "train_steps": data.get("train_steps"),
+            "trained_step": data.get("trained_step"),
+            "trained_at": data.get("trained_at"),
             "mode": data.get("mode"),
         })
     return rows

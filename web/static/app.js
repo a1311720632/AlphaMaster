@@ -578,23 +578,80 @@ async function loadSymbolChart(symbol, progress) {
   }
 }
 
+let lastStrategies = [];
+let strategiesDelegateBound = false;
+function ensureStrategiesDelegate() {
+  if (strategiesDelegateBound) return;
+  const tbody = $("strategiesBody");
+  if (!tbody) return;
+  tbody.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-file]");
+    if (!btn) return;
+    removeStrategy(btn.dataset.file);
+  });
+  strategiesDelegateBound = true;
+}
+
+async function removeStrategy(file) {
+  if (!file) return;
+  if (!confirm(`删除策略 ${file}？此操作不可撤销。`)) return;
+  try {
+    await fetchJSON("/api/strategies", { method: "DELETE", body: JSON.stringify({ file }) });
+    await refreshOverview();
+  } catch (e) {
+    showErrorPopup("删除失败", e.message);
+  }
+}
+
 function renderStrategies(rows) {
+  lastStrategies = rows;
   const tbody = $("strategiesBody");
   if (!rows.length) {
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="4">暂无已保存策略</td></tr>';
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="6">暂无已保存策略</td></tr>';
     return;
   }
-  tbody.innerHTML = rows
-    .map(
-      (r) => `
-    <tr>
-      <td>${r.symbol}</td>
-      <td>${r.timeframe || "—"}</td>
-      <td>${formatScore(r.best_score)}</td>
-      <td><code>${r.formula_decoded || "—"}</code></td>
-    </tr>`
-    )
-    .join("");
+  // 排序：品种 → 周期 → 训练时间倒序（新在前）
+  const sorted = [...rows].sort(
+    (a, b) =>
+      String(a.symbol).localeCompare(String(b.symbol)) ||
+      String(a.timeframe || "").localeCompare(String(b.timeframe || "")) ||
+      String(b.trained_at || "").localeCompare(String(a.trained_at || ""))
+  );
+  let html = "";
+  let i = 0;
+  while (i < sorted.length) {
+    const sym = sorted[i].symbol;
+    let j = i;
+    while (j < sorted.length && sorted[j].symbol === sym) j++;
+    const span = j - i;
+    for (let k = i; k < j; k++) {
+      const r = sorted[k];
+      const step = r.trained_step != null ? `step${r.trained_step}` : "—";
+      const ts = r.trained_at || "";
+      const tsShort = ts
+        ? `${ts.slice(4, 6)}-${ts.slice(6, 8)} ${ts.slice(9, 11)}:${ts.slice(11, 13)}`
+        : "";
+      const stepCell = tsShort
+        ? `${step}<br><small style="opacity:.6">${tsShort}</small>`
+        : step;
+      const symCell =
+        k === i
+          ? `<td rowspan="${span}" style="vertical-align:top;font-weight:600">${escHtml(sym)}</td>`
+          : "";
+      html += `
+      <tr>
+        ${symCell}
+        <td>${escHtml(r.timeframe || "—")}</td>
+        <td>${stepCell}</td>
+        <td>${formatScore(r.best_score)}</td>
+        <td><code>${escHtml(r.formula_decoded || "—")}</code></td>
+        <td><button class="strat-remove" data-file="${escHtml(r.file)}" title="删除">×</button></td>
+      </tr>`;
+    }
+    i = j;
+  }
+  tbody.innerHTML = html;
+  ensureStrategiesDelegate();
 }
 
 function updateTrainingUI(training, progress) {
@@ -1110,15 +1167,35 @@ function parseContentDispositionFilename(header) {
   return plain ? plain[1].trim() : null;
 }
 
+function pickStrategyFileForSymbol(sym) {
+  // 该品种最高分策略的文件名（多周期/多条后用 file 定位导出）
+  const rows = (lastStrategies || []).filter((r) => r.symbol === sym);
+  if (!rows.length) return null;
+  let best = rows[0];
+  for (const r of rows) {
+    if ((r.best_score ?? -Infinity) > (best.best_score ?? -Infinity)) best = r;
+  }
+  return best.file;
+}
+
 async function exportStrategy() {
   const sym = selectedSymbol;
   if (!sym) {
     await logClientError("请先选择数据文件");
     return;
   }
-  const path = `/api/strategies/${encodeURIComponent(sym)}/export`;
+  const file = pickStrategyFileForSymbol(sym);
+  if (!file) {
+    await logClientError(`未找到 ${sym} 的已保存策略`);
+    return;
+  }
+  const path = "/api/strategies/export";
   try {
-    const res = await fetch(API + path);
+    const res = await fetch(API + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file }),
+    });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(formatApiError(data, res.status, path));
@@ -2720,6 +2797,8 @@ function initAutopilotOnce() {
   $("apBrowseStrategyBtn").addEventListener("click", browseAutopilotStrategy);
   $("apStartBtn").addEventListener("click", startAutopilot);
   $("apStopBtn").addEventListener("click", stopAutopilot);
+  const apResetBtn = $("apResetBtn");
+  if (apResetBtn) apResetBtn.addEventListener("click", resetAutopilot);
   // 从已保存设置恢复模式/品种/周期
   fetchJSON("/api/settings", { silent: true })
     .then((s) => {
@@ -2816,6 +2895,18 @@ async function stopAutopilot() {
   }
 }
 
+async function resetAutopilot() {
+  if (!confirm("一键清除：停止自动驾驶并清空所有历史记录（持仓/成交/权益曲线），权益回到初始状态。确定？")) return;
+  try {
+    await fetchJSON("/api/autopilot/reset", { method: "POST" });
+    apPositionSig = "";  // 清前端签名缓存，强制重渲染为空
+    apFillsSig = "";
+    await refreshAutopilot();
+  } catch (e) {
+    showErrorPopup("清除失败", e.message);
+  }
+}
+
 function fmtAp(v, digits = 4) {
   if (v == null || Number.isNaN(v)) return "—";
   return Number(v).toFixed(digits);
@@ -2851,6 +2942,114 @@ async function refreshAutopilot() {
 
   const logView = $("apLogView");
   if (logView) logView.textContent = (st.log_tail || []).join("\n") || "等待任务…";
+
+  renderApPosition(st.state);
+  renderApFills(st.state?.trades);
+}
+
+// 签名守卫：4s 轮询时数值未变则不重建 DOM，避免闪烁/sparkline 重放（仿 btPortfolioSig）
+let apPositionSig = "";
+let apFillsSig = "";
+
+function renderApPosition(state) {
+  const lb = state?.last_bar;
+  const startEq = Number(state?.start_equity) || 0;
+  const totalRet = state?.realtime_total_return;
+  const rtEq = state?.realtime_equity;
+  const lastPrice = state?.last_price;
+  const upnl = state?.unrealized_pnl_live;
+  const actual = lb ? Number(lb.actual_notional) : 0;
+  const entry = lb ? Number(lb.entry_price) : 0;
+
+  // 总收益：百分比 + 绝对值(USDT) + sparkline（history equity 序列）
+  const totalAbs = rtEq != null && startEq > 0 ? rtEq - startEq : null;
+  const totalCls = (totalRet ?? 0) >= 0 ? "pos" : "neg";
+  const posColor = (totalRet ?? 0) >= 0 ? "#4ade80" : "#f87171";
+  const posRGB = (totalRet ?? 0) >= 0 ? "74, 222, 128" : "248, 113, 113";
+  const eqSeries = (state?.history || []).map((h) => Number(h?.equity)).filter((v) => Number.isFinite(v));
+  const eqSpark = eqSeries.length >= 2 ? sparklineSVG(eqSeries, { color: posColor, fillRGB: posRGB }) : "";
+
+  // 签名守卫（含 sparkline 序列长度）
+  const sig = [totalRet, rtEq, lastPrice, upnl, actual, entry, eqSeries.length].join("|");
+  if (sig === apPositionSig) return;
+  apPositionSig = sig;
+
+  const pctEl = $("apTotalPct");
+  const absEl = $("apTotalAbs");
+  const sparkEl = $("apTotalSpark");
+  if (pctEl) {
+    pctEl.textContent = totalRet != null ? fmtPct(totalRet) : "—";
+    pctEl.className = "metric-value " + (totalRet != null ? totalCls : "");
+  }
+  if (absEl) absEl.textContent = totalAbs != null ? fmtSigned(totalAbs, 2) + " USDT" : "—";
+  if (sparkEl) sparkEl.innerHTML = eqSpark;
+
+  // 持仓表（单品种单行）
+  const tbody = $("apPositionBody");
+  if (!tbody) return;
+  if (!lb) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="5">等待启动…</td></tr>';
+    return;
+  }
+  const dirText = actual > 0 ? "多" : actual < 0 ? "空" : "平";
+  const dirCls = actual > 0 ? "pos" : actual < 0 ? "neg" : "";
+  const upnlCls = (upnl ?? 0) >= 0 ? "pos" : "neg";
+  tbody.innerHTML = `
+    <tr>
+      <td class="${dirCls}">${dirText}</td>
+      <td class="${dirCls}">${fmtSigned(actual, 2)} USDT</td>
+      <td>${entry > 0 ? fmtAp(entry, 4) : "—"}</td>
+      <td>${lastPrice != null ? fmtAp(lastPrice, 4) : "—"}</td>
+      <td class="${upnl != null ? upnlCls : ""}">${upnl != null ? fmtSigned(upnl, 2) + " USDT" : "—"}</td>
+    </tr>`;
+}
+
+function renderApFills(trades) {
+  const tbody = $("apFillsBody");
+  if (!tbody) return;
+  const list = Array.isArray(trades) ? trades : [];
+  const hint = $("apFillsHint");
+  if (!list.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="9">暂无成交</td></tr>';
+    if (hint) hint.textContent = "—";
+    apFillsSig = "";
+    return;
+  }
+  // 签名守卫：长度 + 末条 ts/price/action
+  const lastT = list[list.length - 1];
+  const sig = `${list.length}|${lastT?.ts}|${lastT?.price}|${lastT?.action}`;
+  if (sig === apFillsSig) return;
+  apFillsSig = sig;
+  if (hint) hint.textContent = `${list.length} 笔`;
+  // 最近 50 笔倒序展示
+  const recent = list.slice(-50).reverse();
+  tbody.innerHTML = recent
+    .map((t) => {
+      const action = escHtml(t.action || "—");
+      const actCls = action === "开仓" ? "pos" : action === "平仓" ? "neg" : "";
+      const dir = escHtml(t.direction || "—");
+      const dirCls = dir === "多" ? "pos" : dir === "空" ? "neg" : "";
+      const ts = Number(t.ts) || 0;
+      const tsText = ts ? new Date(ts * 1000).toLocaleString() : "—";
+      const filled = Number(t.filled_notional) || 0;
+      const after = Number(t.pos_after) || 0;
+      const realized = Number(t.realized) || 0;
+      const realizedCls = realized > 0 ? "pos" : realized < 0 ? "neg" : "";
+      const realizedText = Math.abs(realized) > 1e-9 ? fmtSigned(realized, 2) : "—";
+      return `
+      <tr>
+        <td>${escHtml(tsText)}</td>
+        <td class="${actCls}">${action}</td>
+        <td class="${dirCls}">${dir}</td>
+        <td>${fmtAp(Number(t.price) || 0, 4)}</td>
+        <td class="${filled >= 0 ? "pos" : "neg"}">${fmtSigned(filled, 2)}</td>
+        <td class="${after >= 0 ? "pos" : "neg"}">${fmtSigned(after, 2)}</td>
+        <td>${fmtAp(Number(t.entry) || 0, 4)}</td>
+        <td class="${realizedCls}">${realizedText}</td>
+        <td>${fmtAp(Number(t.fee) || 0, 4)}</td>
+      </tr>`;
+    })
+    .join("");
 }
 
 function startPolling() {

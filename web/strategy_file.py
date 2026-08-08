@@ -17,14 +17,29 @@ from web.progress import (
 )
 from web.settings import load_settings
 
-_BEST_NAME_RE = re.compile(r"^best_(.+)\.json$", re.IGNORECASE)
+# 匹配三种策略文件名（symbol 非贪婪，后缀 tf/step/ts 全可选）：
+#   新: best_{sym}_{tf}_step{N}_{YYYYMMDD_HHMMSS}.json
+#   过渡: best_{sym}_{tf}.json
+#   旧: best_{sym}.json
+_BEST_NAME_RE = re.compile(
+    r"^best_(.+?)(?:_([A-Za-z]+\d+))?(?:_step(\d+))?(?:_(\d{8}_\d{4}))?\.json$",
+    re.IGNORECASE,
+)
 _STRATEGY_EXPORT_RE = re.compile(
     r"^strategy_(.+)_step(\d+)(?:_score([\d.]+))?\.json$",
     re.IGNORECASE,
 )
 
 
-def strategy_path_for_symbol(symbol: str) -> Path:
+def strategy_path_for_symbol(symbol: str, timeframe: str = "") -> Path:
+    """该品种（该周期）的「代表」策略路径。
+
+    timeframe 非空 → best_{sym}_{tf}.json（多周期）；空 → 旧 best_{sym}.json（兼容）。
+    注：实际训练产物用带 step/ts 的唯一名（见 train_file._save_strategy），
+    本路径仅用于 sync 写出「该周期最高分代表」/双读兜底。
+    """
+    if timeframe:
+        return STRATEGIES_DIR / f"best_{symbol}_{timeframe}.json"
     return STRATEGIES_DIR / f"best_{symbol}.json"
 
 
@@ -163,17 +178,22 @@ def inspect_strategy_file(
 def resolve_strategy_file(
     saved_path: str,
     train_symbol: str | None = None,
+    train_timeframe: str | None = None,
 ) -> str:
-    """优先使用已保存路径；否则回退到训练品种对应的 best_{symbol}.json。"""
+    """优先使用已保存路径；否则回退到训练品种（该周期）的代表策略。"""
     if saved_path:
         p = Path(saved_path)
         if p.exists():
             return str(p.resolve())
 
     if train_symbol:
-        default = strategy_path_for_symbol(train_symbol)
+        default = strategy_path_for_symbol(train_symbol, train_timeframe or "")
         if default.exists():
             return str(default.resolve())
+        # 周期未命中时回退旧无周期命名
+        legacy = strategy_path_for_symbol(train_symbol)
+        if legacy.exists():
+            return str(legacy.resolve())
 
     return saved_path or ""
 
@@ -191,17 +211,18 @@ def _step_from_export_name(path: Path) -> int:
 def sync_best_strategy_for_symbol(
     symbol: str,
     *,
+    timeframe: str = "",
     data_file_hint: str | None = None,
 ) -> dict[str, Any] | None:
-    """在策略文件与检查点中选出最高分策略，写入 strategies/best_{symbol}.json。"""
+    """在策略文件与检查点中选出最高分策略，写入 strategies/best_{symbol}_{tf}.json。"""
     candidates: list[tuple[float, list[int], int]] = []
 
-    strat = _load_strategy(symbol)
+    strat = _load_strategy(symbol, timeframe)
     if strat and strat.get("formula") and strat.get("best_score") is not None:
         step = int(strat.get("train_step") or strat.get("current_step") or 0)
         candidates.append((float(strat["best_score"]), strat["formula"], step))
 
-    for ckpt_path in checkpoint_glob(symbol):
+    for ckpt_path in checkpoint_glob(symbol, timeframe):
         meta = _load_checkpoint_meta(ckpt_path)
         score = meta.get("best_score")
         formula = meta.get("best_formula")
@@ -222,13 +243,13 @@ def sync_best_strategy_for_symbol(
         candidates.append((float(score), formula, _step_from_export_name(path)))
 
     if not candidates:
-        existing = strategy_path_for_symbol(symbol)
+        existing = strategy_path_for_symbol(symbol, timeframe)
         if existing.exists():
             return inspect_strategy_file(str(existing.resolve()))
         return None
 
     best_score, best_formula, best_step = max(candidates, key=lambda row: row[0])
-    out_path = strategy_path_for_symbol(symbol)
+    out_path = strategy_path_for_symbol(symbol, timeframe)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "vocab_version": VOCAB_VERSION,

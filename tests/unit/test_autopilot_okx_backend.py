@@ -23,6 +23,7 @@ class FakeExchange:
         last_price: float = 100.0,
         contract_size: float = 1.0,
         min_amount: float = 1.0,
+        unrealised: float = 50.0,
     ) -> None:
         self._equity = equity
         self._contracts = position_contracts
@@ -31,6 +32,7 @@ class FakeExchange:
         self._last = last_price
         self._cs = contract_size
         self._min = min_amount
+        self._upnl = unrealised
         self.orders: list[dict] = []
         self.config_calls: list[tuple] = []
 
@@ -60,6 +62,7 @@ class FakeExchange:
         return [{
             "symbol": symbols[0], "contracts": self._contracts,
             "entryPrice": self._entry, "side": self._side,
+            "unrealisedPnl": self._upnl,
         }]
 
     def fetch_ticker(self, symbol):
@@ -151,3 +154,28 @@ def test_configure_account_attempts_one_way_isolated():
     methods = {c[0] for c in ex.config_calls}
     assert "set_position_mode" in methods
     assert "set_margin_mode" in methods
+
+
+def test_fetch_position_detail_returns_triple():
+    ex = FakeExchange(position_contracts=2.0, position_side="long",
+                      entry_price=100.0, unrealised=50.0)
+    be = _backend(ex)
+    notional, entry, unreal = be.fetch_position_detail("BTCUSDT")
+    assert notional == pytest.approx(200.0)
+    assert entry == pytest.approx(100.0)
+    assert unreal == pytest.approx(50.0)
+
+
+def test_fetch_position_detail_short_signs():
+    ex = FakeExchange(position_contracts=2.0, position_side="short",
+                      entry_price=100.0, unrealised=-30.0)
+    be = _backend(ex)
+    notional, entry, unreal = be.fetch_position_detail("BTCUSDT")
+    assert notional == pytest.approx(-200.0)
+    assert entry == pytest.approx(100.0)
+    assert unreal == pytest.approx(-30.0)
+
+
+def test_fetch_position_detail_flat():
+    be = _backend(FakeExchange())  # 无持仓
+    assert be.fetch_position_detail("BTCUSDT") == (0.0, 0.0, 0.0)

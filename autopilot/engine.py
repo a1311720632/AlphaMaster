@@ -83,6 +83,38 @@ def compute_target_from_bars(
     return val, last_close
 
 
+def _classify_action(before: float, after: float, eps: float = 1e-9) -> str:
+    """根据调仓前后持仓（带方向名义）分类动作，供成交记录校验开平仓逻辑。
+
+    开仓/平仓优先（一边≈0），再判反手（穿零），再加仓/减仓（同向）。
+    """
+    b, a = abs(before), abs(after)
+    if b < eps and a >= eps:
+        return "开仓"
+    if a < eps and b >= eps:
+        return "平仓"
+    if before * after < 0:  # 穿零反手
+        return "反手"
+    return "加仓" if a > b else "减仓"
+
+
+def _realized_pnl(
+    before: float, filled: float, fill_price: float, entry_before: float
+) -> float:
+    """这次 fill 中【平仓部分】的实现盈亏（与 mark_to_market 同口径，收益率×名义）。
+
+    开仓/加仓（同向，无平仓）→ 0；减仓/平仓/反手（与 before 反向的部分）→
+    平仓量 × sign(before) × (fill/entry_before − 1)。
+    entry_before 必须用调仓前均价（反手后 entry 被重置为 fill，不能用调仓后值）。
+    """
+    if entry_before <= 0 or fill_price <= 0 or before == 0:
+        return 0.0
+    if (filled > 0) == (before > 0):  # 同向（开仓/加仓），无平仓部分
+        return 0.0
+    closed = min(abs(filled), abs(before))  # 这次平掉的部分名义
+    return math.copysign(closed, before) * (fill_price / entry_before - 1.0)
+
+
 class AutopilotEngine:
     """模式无关的调仓主循环。装配好后调用 run_forever()。"""
 
@@ -131,10 +163,13 @@ class AutopilotEngine:
             self.state = AutopilotState(
                 symbol=strategy.symbol, timeframe=strategy.timeframe, mode=backend.mode
             )
+        # 总收益基线 start_equity 在首根 tick 拿到 equity 时 lazy 设定（见 _tick），
+        # 避免在此额外调用 fetch_equity 破坏 backend 的调用计数语义。
 
         self._last_ts = self.state.last_ts
         self._prev_close = float("nan")
         self._halt_reason = ""
+        self._first_tick = True  # 进程启动后第一根新 bar 不调仓（等下根收盘）
         # 非 None 时处理完这么多根新 bar 后退出（冒烟/冒烟测试用；None=永久运行）
         self._max_bars = max_bars
 
@@ -194,6 +229,8 @@ class AutopilotEngine:
         if cur_ts == self._last_ts:
             return
         is_first = self._last_ts == 0
+        first_tick = self._first_tick
+        self._first_tick = False
         self._last_ts = cur_ts
 
         # 3. 信号（与回测同路径）
@@ -204,36 +241,92 @@ class AutopilotEngine:
             return
 
         # 4. 盘前 mark-to-market（上一期持仓 × close-to-close 收益；交易所后端 no-op）
-        if not is_first and self._prev_close == self._prev_close:  # not NaN
+        #    首根、或恢复 state 后首根（_prev_close 仍为 NaN）都用 (cur,cur)：pnl=0 不动
+        #    权益，但初始化 SimBackend._last_close，使首单 place_delta_order 拿到当根
+        #    收盘作 fill 价——否则恢复后第一条成交价=0、entry 卡 0、未实现盈亏失真。
+        if is_first or self._prev_close != self._prev_close:  # NaN 检查（prev 未就绪）
+            self.backend.mark_to_market(cur_close, cur_close)
+        else:
             self.backend.mark_to_market(self._prev_close, cur_close)
         self._prev_close = cur_close
 
         # 5. 规模（ADR-0002）+ 回撤熔断（ADR-0005）
         equity = self.backend.fetch_equity()
+        if self.state.start_equity <= 0:
+            # 首次拿到 equity 时定总收益基线（paper=起点权益，live=真实余额快照，决策 #3/#6）
+            self.state.start_equity = float(equity)
         peak, dd, tripped = self.drawdown.update(equity)
         if tripped:
-            self.backend.flatten_all(self.strategy.symbol)
-            actual = self.backend.fetch_position_notional(self.strategy.symbol)
+            _, entry_before, _ = self.backend.fetch_position_detail(self.strategy.symbol)
+            res = self.backend.flatten_all(self.strategy.symbol)
+            actual, entry, unreal = self.backend.fetch_position_detail(self.strategy.symbol)
+            self._record_trade(
+                res, cur_ts,
+                before=actual - res.filled_notional, after=actual,
+                entry=entry, entry_before=entry_before, reason="breaker_flatten",
+            )
             self._halt(self.drawdown.reason)
             self._record(
-                cur_ts, cur_close, target_pos, target_pos * equity, actual, equity, peak, dd
+                cur_ts, cur_close, target_pos, target_pos * equity, actual, equity, peak, dd,
+                entry_price=entry, unrealized_pnl=unreal,
             )
             return
 
         # 6. 对账自愈（ADR-0006）：delta 以交易所实际持仓为准
+        #    首根（is_first）不调仓：启动只记录最近已收盘 bar 的 target，等下一根新 bar
+        #    收盘后才第一次调仓（避免一点启动就立刻进场；已收盘信号仍照常计算记录）。
         target_notional = target_pos * equity
-        actual = self.backend.fetch_position_notional(self.strategy.symbol)
+        actual, entry_before, unreal = self.backend.fetch_position_detail(self.strategy.symbol)
         delta = target_notional - actual
         fill_ok = True
-        if abs(delta) > 0 and abs(delta) >= self.min_delta:
+        entry = entry_before  # 不调仓时 entry 不变
+        if not first_tick and abs(delta) > 0 and abs(delta) >= self.min_delta:
             res: OrderResult = self.backend.place_delta_order(self.strategy.symbol, delta)
             fill_ok = res.ok
-            actual = self.backend.fetch_position_notional(self.strategy.symbol)
-        self.monitors.observe(actual, target_notional, fill_ok)
+            actual, entry, unreal = self.backend.fetch_position_detail(self.strategy.symbol)
+            self._record_trade(
+                res, cur_ts,
+                before=actual - res.filled_notional, after=actual,
+                entry=entry, entry_before=entry_before,
+            )
+        if not first_tick:
+            self.monitors.observe(actual, target_notional, fill_ok)
 
-        self._record(cur_ts, cur_close, target_pos, target_notional, actual, equity, peak, dd)
+        self._record(
+            cur_ts, cur_close, target_pos, target_notional, actual, equity, peak, dd,
+            entry_price=entry, unrealized_pnl=unreal,
+        )
 
     # ── 辅助 ───────────────────────────────────────────────────────────
+    def _record_trade(
+        self, res: OrderResult, ts: int, *,
+        before: float, after: float, entry: float, entry_before: float,
+        reason: str = "delta",
+    ) -> None:
+        """成交(fill)入账 + 动作分类 + 方向 + 实现盈亏，供前端校验开平仓逻辑。
+
+        before/after = 调仓前/后持仓；entry = 调仓后开仓均价（展示用）；entry_before =
+        调仓前均价（算实现盈亏——反手后 entry 被重置为 fill，不能用调仓后值）。
+        """
+        if not res or not res.ok or abs(res.filled_notional) <= 1e-9:
+            return
+        realized = _realized_pnl(before, res.filled_notional, res.price, entry_before)
+        direction = "多" if after > 0 else "空" if after < 0 else "平"
+        self.state.record_trade({
+            "ts": ts,
+            "action": _classify_action(before, after),
+            "direction": direction,
+            "side": "buy" if res.filled_notional > 0 else "sell",
+            "filled_notional": float(res.filled_notional),
+            "price": float(res.price),
+            "fee": float(res.fee),
+            "pos_before": float(before),
+            "pos_after": float(after),
+            "entry": float(entry),
+            "realized": float(realized),
+            "reason": reason,
+        })
+
     def _record(
         self,
         ts: int,
@@ -244,6 +337,8 @@ class AutopilotEngine:
         equity: float,
         peak: float,
         dd: float,
+        entry_price: float = 0.0,
+        unrealized_pnl: float = 0.0,
     ) -> None:
         rec = BarRecord(
             ts=ts,
@@ -255,6 +350,8 @@ class AutopilotEngine:
             peak_equity=peak,
             drawdown_pct=dd,
             alerts=self.monitors.drain(),
+            entry_price=entry_price,
+            unrealized_pnl=unrealized_pnl,
         )
         self.state.record(rec)
         self._save()

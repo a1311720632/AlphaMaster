@@ -13,6 +13,7 @@ import json
 import pathlib
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -60,8 +61,12 @@ def train_from_file(data_file: str, *, from_scratch: bool = False) -> AlphaEngin
     engine.mode = "parquet_file"
     engine.train_steps = ModelConfig.TRAIN_STEPS
 
-    ckpt_pattern = str(pathlib.Path("checkpoints") / f"ckpt_{symbol}_step_*.pt")
-    ckpt_files = sorted(_glob.glob(ckpt_pattern))
+    # 新格式（带 tf）优先，回退旧格式（无 tf，兼容已训品种）；不混入其它周期
+    ckpt_patterns = [
+        str(pathlib.Path("checkpoints") / f"ckpt_{symbol}_{timeframe}_step_*.pt"),
+        str(pathlib.Path("checkpoints") / f"ckpt_{symbol}_step_*.pt"),
+    ]
+    ckpt_files = sorted({f for p in ckpt_patterns for f in _glob.glob(p)})
     start_step = 0
 
     if from_scratch:
@@ -80,7 +85,7 @@ def train_from_file(data_file: str, *, from_scratch: bool = False) -> AlphaEngin
                 pass
         print(f"  [重新训练] 已清除 {removed} 个检查点，从第 0 步开始")
         # 保留已有最优策略作为分数下限，避免开局弱公式覆盖 strategies/best_*.json
-        _seed_best_from_strategy(engine, symbol)
+        _seed_best_from_strategy(engine, symbol, timeframe)
         ckpt_files = []
     elif ckpt_files:
         latest = ckpt_files[-1]
@@ -109,59 +114,42 @@ def train_from_file(data_file: str, *, from_scratch: bool = False) -> AlphaEngin
     return engine
 
 
-def _seed_best_from_strategy(engine: AlphaEngine, symbol: str) -> None:
-    """把已有 best_{symbol}.json 当作重新训练的分数下限。"""
-    path = pathlib.Path("strategies") / f"best_{symbol}.json"
-    if not path.exists():
+def _seed_best_from_strategy(engine: AlphaEngine, symbol: str, timeframe: str) -> None:
+    """--from-scratch 分数下限：扫该 (sym,tf) 所有 best_{sym}_{tf}_*.json + 旧 best_{sym}.json 取最高分。"""
+    best: tuple[list[int], float] | None = None
+    patterns = [
+        f"best_{symbol}_{timeframe}_*.json",
+        f"best_{symbol}.json",
+    ]
+    for pat in patterns:
+        for p in _glob.glob(str(pathlib.Path("strategies") / pat)):
+            try:
+                data = json.loads(pathlib.Path(p).read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            formula = data.get("formula")
+            score = data.get("best_score")
+            if not formula or score is None:
+                continue
+            try:
+                formula_i = [int(t) for t in formula]
+                f_score = float(score)
+            except (TypeError, ValueError):
+                continue
+            if best is None or f_score > best[1]:
+                best = (formula_i, f_score)
+    if best is None:
         return
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"  [警告] 读取已有策略失败: {e}")
-        return
-    formula = data.get("formula")
-    score = data.get("best_score")
-    if not formula or score is None:
-        return
-    try:
-        engine.best_formula = [int(t) for t in formula]
-        engine.best_score = float(score)
-        print(f"  [重新训练] 保留已有最优分数下限={engine.best_score:.4f}，仅更好时才会覆盖策略文件")
-    except (TypeError, ValueError) as e:
-        print(f"  [警告] 已有策略无法用作下限: {e}")
+    engine.best_formula, engine.best_score = best
+    print(f"  [重新训练] 历史最高分下限={engine.best_score:.4f}（扫 {symbol}_{timeframe}_* + 旧名）")
 
 
 def _save_strategy(engine: AlphaEngine, symbol: str, timeframe: str, data_file: str) -> None:
-    path = pathlib.Path("strategies") / f"best_{symbol}.json"
+    """每次训练存独立产物 best_{sym}_{tf}_step{N}_{ts}.json（不覆盖历史，时间戳区分多次训练）。"""
+    step = int(ModelConfig.TRAIN_STEPS)  # 训练实际步数（训满；engine 未暴露 current_step）
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = pathlib.Path("strategies") / f"best_{symbol}_{timeframe}_step{step}_{ts}.json"
     path.parent.mkdir(exist_ok=True)
-    # 若磁盘上已有更高分，不要用更弱结果覆盖
-    if path.exists() and engine.best_formula is not None:
-        try:
-            old = json.loads(path.read_text(encoding="utf-8"))
-            old_score = old.get("best_score")
-            if old_score is not None and float(old_score) > float(engine.best_score):
-                print(
-                    f"  [策略] 保留磁盘更优结果 {float(old_score):.4f} "
-                    f"> 本次 {float(engine.best_score):.4f}，未覆盖 {path}"
-                )
-                merged = dict(old)
-                for key, val in (
-                    ("timeframe", timeframe),
-                    ("data_file", str(Path(data_file).resolve())),
-                    ("mode", "parquet_file"),
-                    ("train_steps", ModelConfig.TRAIN_STEPS),
-                ):
-                    if val is not None and not merged.get(key):
-                        merged[key] = val
-                if merged != old:
-                    path.write_text(
-                        json.dumps(merged, indent=2, ensure_ascii=False),
-                        encoding="utf-8",
-                    )
-                    print(f"  [策略] 已补全数据路径等元数据: {path}")
-                return
-        except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            pass
     data = {
         "vocab_version": VOCAB_VERSION,
         "symbol": symbol,
@@ -174,6 +162,8 @@ def _save_strategy(engine: AlphaEngine, symbol: str, timeframe: str, data_file: 
         else None,
         "best_score": engine.best_score,
         "train_steps": ModelConfig.TRAIN_STEPS,
+        "trained_step": step,
+        "trained_at": ts,
     }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"  策略已保存: {path}")

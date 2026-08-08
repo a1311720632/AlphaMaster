@@ -78,10 +78,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # 命令行覆盖品种/周期（否则用策略文件里的）
     symbol = args.symbol or strategy.symbol
-    timeframe = args.timeframe or strategy.timeframe or "1h"
     # 同步回 strategy 供 engine 用其 timeframe 决定 cadence
-    from autopilot.strategy_loader import StrategySpec
+    from autopilot.strategy_loader import StrategySpec, normalize_timeframe
 
+    # --timeframe 容忍 MT5 风格写法（H1/M15…）；策略内周期已在 load_strategy 归一化为规范周期
+    timeframe = (
+        normalize_timeframe(args.timeframe) if args.timeframe else (strategy.timeframe or "1h")
+    )
     strategy = StrategySpec(
         formula=strategy.formula,
         symbol=symbol,
