@@ -83,6 +83,9 @@
       <h2>启动训练</h2>
       <div class="launch-form launch-form-file">
         <div class="launch-row launch-row-main">
+          <select id="trainDataSelect" style="min-width:240px;max-width:60%" title="从 KLINE_CACHE_DIR/项目根 列出的 Parquet 中选（headless 用这个；本机桌面也可点「选择数据文件」弹框）">
+            <option value="">— 选择数据文件 —</option>
+          </select>
           <button type="button" class="btn btn-secondary btn-browse" id="browseBtn">选择数据文件</button>
           <div class="data-file-card" id="dataFileCard">
             <div class="data-file-empty">尚未选择数据文件</div>
@@ -270,6 +273,9 @@
         <h2>启动回测</h2>
         <div class="launch-form launch-form-file">
           <div class="launch-row launch-row-main">
+            <select id="btStrategySelect" style="min-width:240px;max-width:60%" title="从已保存的策略中选（headless 用这个；本机桌面也可点「选择策略」弹框）">
+              <option value="">— 选择已保存策略 —</option>
+            </select>
             <button type="button" class="btn btn-secondary btn-browse" id="btBrowseStrategyBtn">选择策略</button>
             <div class="data-file-card" id="btStrategyCard">
               <div class="data-file-empty">尚未选择策略文件</div>

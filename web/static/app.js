@@ -952,14 +952,64 @@ async function runAiAnalyze() {
   }
 }
 
+let btStrategyRows = [];
 async function browseStrategyFile() {
   try {
     const res = await fetchJSON("/api/strategy-file/browse", { method: "POST" });
+    if (res.native_picker === false) {
+      // headless：原生选框不可用——隐藏按钮，引导用下拉
+      const b = $("btBrowseStrategyBtn");
+      if (b) b.style.display = "none";
+      return;
+    }
     if (res.cancelled) return;
     renderStrategyFileCard(res);
   } catch (e) {
     $("debugView")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
+}
+
+async function populateBtStrategySelect() {
+  // headless 友好：从 /api/strategies 填充下拉（替代弹不了的本地选框）
+  const sel = $("btStrategySelect");
+  if (!sel) return;
+  try {
+    const data = await fetchJSON("/api/strategies", { silent: true });
+    btStrategyRows = (data && data.strategies) || [];
+  } catch (_) {
+    btStrategyRows = [];
+  }
+  const opts = ['<option value="">— 选择已保存策略 —</option>'];
+  btStrategyRows.forEach((r) => {
+    const score = r.best_score != null ? Number(r.best_score).toFixed(3) : "—";
+    const tf = r.timeframe ? ` ${r.timeframe}` : "";
+    opts.push(`<option value="${escHtml(r.path)}">${escHtml(r.symbol || "?")}${tf} · 分数 ${score}</option>`);
+  });
+  const prev = selectedStrategyFile || sel.value;
+  sel.innerHTML = opts.join("");
+  if (prev) sel.value = prev;
+}
+
+function onBtStrategyChange() {
+  const sel = $("btStrategySelect");
+  const path = sel ? sel.value : "";
+  if (!path) {
+    renderStrategyFileCard(null);
+    return;
+  }
+  const r = btStrategyRows.find((x) => x.path === path);
+  renderStrategyFileCard(
+    r
+      ? {
+          strategy_file: r.path,
+          filename: r.file,
+          symbol: r.symbol,
+          timeframe: r.timeframe,
+          best_score: r.best_score,
+          formula_decoded: r.formula_decoded,
+        }
+      : { strategy_file: path }
+  );
 }
 
 async function applyBestStrategyForBacktest(symbol, strategyFile) {
@@ -993,15 +1043,59 @@ async function loadBacktestStrategyContext() {
   }
 }
 
+let trainDataRows = [];
 async function browseDataFile() {
   try {
     const res = await fetchJSON("/api/data-file/browse", { method: "POST" });
+    if (res.native_picker === false) {
+      // headless：原生选框不可用——隐藏按钮，引导用下拉
+      const b = $("browseBtn");
+      if (b) b.style.display = "none";
+      return;
+    }
     if (res.cancelled) return;
     renderDataFileCard(res);
     selectedSymbol = res.symbol;
     await loadSymbolChart(res.symbol);
   } catch (e) {
     $("debugView").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+async function populateTrainDataSelect() {
+  // headless 友好：从 /api/data-file/list 列出 Parquet 填充下拉
+  const sel = $("trainDataSelect");
+  if (!sel) return;
+  try {
+    const data = await fetchJSON("/api/data-file/list", { silent: true });
+    trainDataRows = (data && data.files) || [];
+  } catch (_) {
+    trainDataRows = [];
+  }
+  const opts = ['<option value="">— 选择数据文件 —</option>'];
+  trainDataRows.forEach((f) => {
+    const sym = f.symbol || "?";
+    const tf = f.timeframe ? ` ${f.timeframe}` : "";
+    const bars = f.bars != null ? ` · ${Number(f.bars).toLocaleString()} 根` : "";
+    opts.push(`<option value="${escHtml(f.data_file)}">${escHtml(sym)}${tf}${bars}</option>`);
+  });
+  const prev = selectedDataFile || sel.value;
+  sel.innerHTML = opts.join("");
+  if (prev) sel.value = prev;
+}
+
+function onTrainDataChange() {
+  const sel = $("trainDataSelect");
+  const path = sel ? sel.value : "";
+  if (!path) {
+    renderDataFileCard(null);
+    return;
+  }
+  const info = trainDataRows.find((x) => x.data_file === path);
+  if (info) {
+    renderDataFileCard(info);
+    selectedSymbol = info.symbol || null;
+    if (info.symbol) loadSymbolChart(info.symbol);
   }
 }
 
@@ -3109,6 +3203,10 @@ async function init() {
     await logClientError("初始化失败: " + e.message);
   }
   $("browseBtn").addEventListener("click", browseDataFile);
+  if ($("trainDataSelect")) {
+    $("trainDataSelect").addEventListener("change", onTrainDataChange);
+    populateTrainDataSelect();
+  }
   $("startBtn").addEventListener("click", startTraining);
   if ($("retrainBtn")) $("retrainBtn").addEventListener("click", retrainFromScratch);
   $("stopBtn").addEventListener("click", stopTraining);
@@ -3140,6 +3238,10 @@ async function init() {
 
   // 回测控制
   if ($("btBrowseStrategyBtn")) $("btBrowseStrategyBtn").addEventListener("click", browseStrategyFile);
+  if ($("btStrategySelect")) {
+    $("btStrategySelect").addEventListener("change", onBtStrategyChange);
+    populateBtStrategySelect();
+  }
   if ($("btStartBtn")) $("btStartBtn").addEventListener("click", startBacktest);
   if ($("btStopBtn")) $("btStopBtn").addEventListener("click", stopBacktest);
   ["btCommissionInput", "btSlippageInput"].forEach((id) => {

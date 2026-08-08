@@ -485,6 +485,40 @@ def api_browse_data_file() -> dict[str, Any]:
     return _browse_data_file()
 
 
+@app.get("/api/data-file/list")
+def api_list_data_files() -> dict[str, Any]:
+    """headless 友好：列出 KLINE_CACHE_DIR + 项目根下的 *.parquet（下拉选，替代弹不了的本地选框）。
+    复用 inspect_parquet_file 取 symbol/timeframe/bars，让前端 renderDataFileCard 直接可用。"""
+    from config import Config
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for d in (Path(Config.KLINE_CACHE_DIR), ROOT):
+        try:
+            base = Path(d).resolve()
+        except OSError:
+            continue
+        if not base.exists():
+            continue
+        for p in sorted(base.glob("*.parquet")):
+            key = str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                info = inspect_parquet_file(str(p))
+            except Exception as exc:  # noqa: BLE001 - 单个文件坏不影响整列
+                info = {
+                    "data_file": str(p),
+                    "filename": p.name,
+                    "valid": False,
+                    "message": f"读取失败: {exc}",
+                }
+            info.setdefault("filename", p.name)
+            out.append(info)
+    return {"files": out}
+
+
 @app.post("/api/strategy-file/browse")
 @app.get("/api/strategy-file/browse")
 def api_browse_strategy_file() -> dict[str, Any]:
