@@ -913,6 +913,31 @@ def api_backtest_status() -> dict[str, Any]:
     return status
 
 
+def _resolve_data_file_fallback(symbol: str | None, timeframe: str | None) -> str | None:
+    """策略记录的 data_file 在当前环境加载不了时（典型：服务器上 strategy JSON 仍存着
+    Windows 训练路径），按 {SYMBOL}_{TIMEFRAME}.parquet 从 KLINE_CACHE_DIR + 项目根兜底。"""
+    from config import Config
+
+    if not symbol or not timeframe:
+        return None
+    names = [f"{symbol}_{timeframe}.parquet"]
+    low = timeframe.lower()
+    if low != timeframe:
+        names.append(f"{symbol}_{low}.parquet")
+    for d in (Path(Config.KLINE_CACHE_DIR), ROOT):
+        try:
+            base = Path(d).resolve()
+        except OSError:
+            continue
+        if not base.exists():
+            continue
+        for name in names:
+            p = base / name
+            if p.is_file():
+                return str(p)
+    return None
+
+
 @app.post("/api/backtest/start")
 def api_backtest_start(req: StartBacktestRequest) -> dict[str, Any]:
     info = _inspect_strategy_or_http(req.strategy_file)
@@ -937,6 +962,7 @@ def api_backtest_start(req: StartBacktestRequest) -> dict[str, Any]:
     })
 
     data_file: str | None = None
+    strat_load_error: str | None = None
     # 1) 优先用策略 JSON 里记录的训练数据路径
     strat_data = (info.get("data_file") or "").strip()
     if strat_data:
@@ -951,10 +977,9 @@ def api_backtest_start(req: StartBacktestRequest) -> dict[str, Any]:
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(
-                400,
-                f"策略记录的数据文件无法加载: {strat_data}\n{e}",
-            ) from e
+            # 策略记录的是本机训练路径，当前环境（如服务器）可能找不到——
+            # 不在此直接报错，记下来落到下面按 symbol+tf 兜底
+            strat_load_error = f"{strat_data}（{e}）"
     else:
         # 2) 回退：训练页最近选择的、同品种 Parquet
         last_data = settings.get("last_data_file") or ""
@@ -966,12 +991,17 @@ def api_backtest_start(req: StartBacktestRequest) -> dict[str, Any]:
             except Exception:
                 pass
 
+    # 3) 仍没有 → 按 {SYMBOL}_{TIMEFRAME}.parquet 从 KLINE_CACHE_DIR/项目根兜底
+    #    （服务器上 strategy JSON 常存着 Windows 训练路径，这里改用本地数据）
     if not data_file:
+        data_file = _resolve_data_file_fallback(info.get("symbol"), info.get("timeframe"))
+
+    if not data_file:
+        hint = f"（策略记录的 data_file 加载失败: {strat_load_error}）" if strat_load_error else ""
         raise HTTPException(
             400,
-            "该策略未记录数据文件路径（data_file），且当前也没有同品种的 Parquet。"
-            "请先在「模型训练」页选择对应品种的 Parquet 再回测；"
-            "或使用本软件训练/导出、且包含 data_file 字段的策略文件。",
+            "该策略未记录可用数据文件路径，且未按 symbol+周期在 KLINE_CACHE_DIR 找到同名 Parquet。"
+            f"{hint} 请在「模型训练」页选择对应品种的 Parquet 再回测。",
         )
 
     save_settings({"last_data_file": data_file})
