@@ -7,7 +7,8 @@
 #   MetaTrader5   — Windows-only，Debian 上 pip 必失败（代码在 config.py 已 stub）
 #   tvdatafeed    — git+https VCS 安装，OKX paper 用不到
 #   tushare/pytdx/tqsdk — 国内数据源，未用
-#   matplotlib/seaborn  — 仅 research（requirements-optional.txt）
+#   matplotlib     — 已含（回测画图需要，run_backtest.py + backtest_viz；用 Agg 后端）
+#   seaborn        — 仅 experiment.py/research，未含
 #   playwright    — 浏览器自动化，未用
 #   pytest/hypothesis — 测试
 
@@ -15,6 +16,7 @@ numpy
 scipy
 pandas
 pyarrow
+matplotlib   # 回测画图（run_backtest.py + backtest_viz 用 Agg 后端，headless 安全）
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 python-multipart>=0.0.9
