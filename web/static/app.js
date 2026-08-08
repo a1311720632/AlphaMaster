@@ -3124,7 +3124,12 @@ function renderApPosition(state) {
     tbody.innerHTML = '<tr class="empty-row"><td colspan="5">等待启动…</td></tr>';
     return;
   }
-  const dirText = actual > 0 ? "多" : actual < 0 ? "空" : "平";
+  if (Math.abs(actual) < 1e-9) {
+    // 无实际持仓（空仓）→ 持仓表留空，不展示"方向=平"的记录
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="5">空仓</td></tr>';
+    return;
+  }
+  const dirText = actual > 0 ? "多" : "空";
   const dirCls = actual > 0 ? "pos" : actual < 0 ? "neg" : "";
   const upnlCls = (upnl ?? 0) >= 0 ? "pos" : "neg";
   tbody.innerHTML = `
