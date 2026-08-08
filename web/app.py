@@ -508,9 +508,15 @@ def api_list_data_files() -> dict[str, Any]:
             try:
                 info = inspect_parquet_file(str(p))
             except Exception as exc:  # noqa: BLE001 - 单个文件坏不影响整列
+                # inspect 抛错（如日线 <3000 根"数据不足"）时，仍从文件名解析
+                # symbol/timeframe，让前端下拉正常显示（如 BTCUSDT D1）而非 "?"
+                stem = p.stem
+                parts = stem.rsplit("_", 1)
                 info = {
                     "data_file": str(p),
                     "filename": p.name,
+                    "symbol": parts[0] if len(parts) == 2 else stem,
+                    "timeframe": parts[1] if len(parts) == 2 else "",
                     "valid": False,
                     "message": f"读取失败: {exc}",
                 }
