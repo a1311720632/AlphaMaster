@@ -3034,6 +3034,8 @@ async function resetAutopilot() {
     await fetchJSON("/api/autopilot/reset", { method: "POST" });
     apPositionSig = "";  // 清前端签名缓存，强制重渲染为空
     apFillsSig = "";
+    apDailySig = "";  // 每日盈亏：清签名 + 销毁图，避免 reset 后留陈旧画面
+    if (apDailyChart) { apDailyChart.destroy(); apDailyChart = null; }
     await refreshAutopilot();
   } catch (e) {
     showErrorPopup("清除失败", e.message);
@@ -3043,6 +3045,199 @@ async function resetAutopilot() {
 function fmtAp(v, digits = 4) {
   if (v == null || Number.isNaN(v)) return "—";
   return Number(v).toFixed(digits);
+}
+
+// ========= autopilot 每日盈亏日历 + 收益曲线（纯前端聚合；不动 engine/state，保 parity）=========
+let apDailyChart = null;   // Chart.js 实例
+let apDailySig = "";       // 结构签名：天数|末日 dayKey，仅结构变化才重建图
+
+// 按 UTC 切日（与 OKX bar.ts 的 open-time UTC 口径一致；勿用本地时区）
+function apUtcDayKey(tsSec) {
+  const d = new Date((tsSec || 0) * 1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// dayKey("YYYY-MM-DD") → 周一起始的星期几 0..6（周一=0）
+function apUtcWeekdayMon0(dayKey) {
+  const [y, m, d] = dayKey.split("-").map(Number);
+  return (new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7;
+}
+
+// dayKey 所在周一的 UTC 毫秒
+function apUtcMondayMs(dayKey) {
+  const [y, m, d] = dayKey.split("-").map(Number);
+  return Date.UTC(y, m - 1, d) - apUtcWeekdayMon0(dayKey) * 86400000;
+}
+
+// 单遍聚合：按 UTC 开盘日切日；日 PnL = 当日末根 equity − 前日末根 equity
+// 望远镜恒等：Σ(daily pnl) = 末根 equity − history[0].equity（验证用）
+function apAggregateDaily(history) {
+  const bars = (Array.isArray(history) ? history : [])
+    .map((h) => ({ ts: Number(h && h.ts) || 0, eq: Number(h && h.equity) }))
+    .filter((b) => b.ts > 0 && Number.isFinite(b.eq))
+    .slice()
+    .sort((a, b) => a.ts - b.ts);   // 防御性排序，防时钟偏移导致非单调
+  if (!bars.length) return [];
+  const days = [];
+  let curKey = apUtcDayKey(bars[0].ts);
+  let dayStartPrevEq = bars[0].eq;   // 决策 7：首日基准 = 窗口首根 bar 权益
+  let dayEndEq = bars[0].eq;
+  for (const b of bars) {
+    const k = apUtcDayKey(b.ts);
+    if (k !== curKey) {
+      days.push({ day: curKey, pnl: dayEndEq - dayStartPrevEq, endEquity: dayEndEq });
+      dayStartPrevEq = dayEndEq;     // 前日末根 = 本日基准
+      curKey = k;
+    }
+    dayEndEq = b.eq;
+  }
+  days.push({ day: curKey, pnl: dayEndEq - dayStartPrevEq, endEquity: dayEndEq });
+  if (days.length) {
+    days[days.length - 1].isLast = true;   // 末日 = 进行中
+    days[0].isFirst = true;                // 首日可能为部分日（窗口滑过）
+  }
+  return days;
+}
+
+// 盈亏日历：GitHub 式周历（周一~周日 × N 周），绿/红深浅按当日盈亏幅度
+function renderApCalendar(days) {
+  const el = $("apCalendar");
+  if (!el) return;
+  if (!document.getElementById("apcal-style")) {
+    const st = document.createElement("style");
+    st.id = "apcal-style";
+    st.textContent =
+      ".apcal-scroll{overflow-x:auto;padding:2px 2px 6px}" +
+      ".apcal-row{display:flex;gap:3px;margin-bottom:3px;align-items:center}" +
+      ".apcal-cell{width:18px;height:18px;border-radius:3px;flex:0 0 auto}" +
+      ".apcal-yl{width:18px;color:#9aa6bd;font-size:10px;text-align:center;flex:0 0 auto}" +
+      ".apcal-mh{width:18px;color:#7d8aa3;font-size:9px;height:14px;display:flex;align-items:center;justify-content:center;flex:0 0 auto}" +
+      ".apcal-empty{background:#1a2233}" +
+      ".apcal-last{outline:1px solid #5eead4;outline-offset:-1px}";
+    document.head.appendChild(st);
+  }
+  if (!days || !days.length) {
+    el.innerHTML = '<span style="color:#7d8aa3;font-size:12px;">暂无数据，启动 autopilot 后生成</span>';
+    return;
+  }
+  // maxAbs 只在已完成日上算（进行中半日大波动会冲淡尺度）
+  let maxAbs = 0;
+  for (const d of days) if (!d.isLast && Math.abs(d.pnl) > maxAbs) maxAbs = Math.abs(d.pnl);
+  if (!(maxAbs > 0)) maxAbs = 1;
+  const colorFor = (pnl) => {
+    if (pnl == null || !Number.isFinite(pnl)) return "#1a2233";
+    const a = 0.15 + (Math.abs(pnl) / maxAbs) * 0.7;
+    return pnl >= 0 ? `rgba(74,222,128,${a.toFixed(3)})` : `rgba(248,113,113,${a.toFixed(3)})`;
+  };
+  const firstMonMs = apUtcMondayMs(days[0].day);
+  const weekOf = (day) => Math.round((apUtcMondayMs(day) - firstMonMs) / (7 * 86400000));
+  const cellMap = {};
+  let nWeeks = 1;
+  for (const d of days) {
+    const wi = weekOf(d.day);
+    cellMap[wi + "_" + apUtcWeekdayMon0(d.day)] = d;
+    if (wi + 1 > nWeeks) nWeeks = wi + 1;
+  }
+  // 顶部月份标签行（GitHub 风格：月份变化处显示 MM）
+  let html = '<div class="apcal-row"><span class="apcal-yl"></span>';
+  let prevMon = "";
+  for (let wi = 0; wi < nWeeks; wi++) {
+    let mon = "";
+    for (let wd = 0; wd < 7; wd++) {
+      const d = cellMap[wi + "_" + wd];
+      if (d) { mon = d.day.slice(5, 7); break; }
+    }
+    const show = mon && mon !== prevMon ? mon : "";
+    html += `<span class="apcal-mh">${show}</span>`;
+    if (mon) prevMon = mon;
+  }
+  html += "</div>";
+  // 7 个星期行
+  const rowLabels = ["一", "二", "三", "四", "五", "六", "日"];
+  for (let wd = 0; wd < 7; wd++) {
+    html += `<div class="apcal-row"><span class="apcal-yl">${rowLabels[wd]}</span>`;
+    for (let wi = 0; wi < nWeeks; wi++) {
+      const d = cellMap[wi + "_" + wd];
+      if (!d) {
+        html += '<span class="apcal-cell apcal-empty"></span>';
+      } else {
+        const cls = d.isLast ? "apcal-cell apcal-last" : "apcal-cell";
+        const tag = d.isFirst ? "（窗口起点，部分日）" : d.isLast ? "（进行中）" : "";
+        html += `<span class="${cls}" style="background:${colorFor(d.pnl)}" title="${d.day}  ${fmtSigned(d.pnl, 4)} USDT${tag}"></span>`;
+      }
+    }
+    html += "</div>";
+  }
+  el.innerHTML = html;
+}
+
+// 收益曲线：按天一个点（当日末根 equity）；split signature-guard 防 4s 闪烁
+function renderApDailyCurve(days) {
+  const canvas = $("apDailyChart");
+  if (!canvas) return;
+  const hint = $("apDailyChartHint");
+  if (!days || days.length < 2) {
+    if (apDailyChart) { apDailyChart.destroy(); apDailyChart = null; }
+    apDailySig = "";
+    if (hint) hint.style.display = "flex";
+    return;
+  }
+  if (hint) hint.style.display = "none";
+  const labels = days.map((d) => d.day.slice(5));   // MM-DD
+  const data = days.map((d) => d.endEquity);
+  const lastEnd = data[data.length - 1];
+  const structSig = `${days.length}|${days[days.length - 1].day}`;
+  // 结构未变（仅末点 equity 动，4s 常态）→ 原地刷末点，不重建、不动画
+  if (structSig === apDailySig && apDailyChart) {
+    const arr = apDailyChart.data.datasets[0].data;
+    if (Number(arr[arr.length - 1]) !== lastEnd) {
+      arr[arr.length - 1] = lastEnd;
+      apDailyChart.update("none");
+    }
+    return;
+  }
+  // 结构变化（新增一天）→ 重建。
+  // 注意：EQUITY_OPTIONS.plugins.tooltip.callbacks.label 是函数，structuredClone 不能克隆函数；
+  // 故手动深拷贝到 callbacks 层，既保留函数、又不污染回测 equity 图的 tooltip。
+  const baseTip = EQUITY_OPTIONS.plugins.tooltip;
+  const opts = {
+    ...EQUITY_OPTIONS,
+    animation: false,
+    plugins: {
+      ...EQUITY_OPTIONS.plugins,
+      tooltip: {
+        ...baseTip,
+        callbacks: { ...baseTip.callbacks, label: (c) => ` ${Number(c.parsed.y).toFixed(4)} USDT` },
+      },
+    },
+  };
+  const pRadius = labels.map(() => 0);
+  const pBg = labels.map(() => "#5eead4");
+  pRadius[pRadius.length - 1] = 3;
+  pBg[pBg.length - 1] = "#fbbf24";   // 末日琥珀 = 进行中
+  if (apDailyChart) apDailyChart.destroy();
+  apDailyChart = new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: "权益 (USDT)",
+        data,
+        borderColor: "#5eead4",
+        borderWidth: 2.2,
+        tension: 0.25,
+        pointRadius: pRadius,
+        pointBackgroundColor: pBg,
+        fill: true,
+        backgroundColor: (ctx) => verticalGradient(ctx.chart, "94, 234, 212", 0.3, 0),
+      }],
+    },
+    options: opts,
+  });
+  apDailySig = structSig;
 }
 
 async function refreshAutopilot() {
@@ -3078,6 +3273,9 @@ async function refreshAutopilot() {
 
   renderApPosition(st.state);
   renderApFills(st.state?.trades);
+  const apDays = apAggregateDaily(st.state?.history);
+  renderApCalendar(apDays);
+  renderApDailyCurve(apDays);
 }
 
 // 签名守卫：4s 轮询时数值未变则不重建 DOM，避免闪烁/sparkline 重放（仿 btPortfolioSig）

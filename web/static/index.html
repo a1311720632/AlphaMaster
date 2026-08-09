@@ -635,6 +635,22 @@
       </div>
     </section>
 
+    <section class="panel chart-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head">
+        <h2>每日盈亏</h2>
+        <span class="hint">按 UTC 切日 · 末列为进行中 · 基线=窗口首根 bar 权益</span>
+      </div>
+      <div class="apcal-scroll" id="apCalendar">
+        <span style="color:#7d8aa3;font-size:12px;">等待启动…</span>
+      </div>
+      <div class="equity-chart-wrap" style="height:220px;margin-top:14px;position:relative;">
+        <canvas id="apDailyChart"></canvas>
+        <span id="apDailyChartHint" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#7d8aa3;font-size:12px;pointer-events:none;">历史不足 2 日，暂无曲线</span>
+      </div>
+    </section>
+
     <div class="split">
       <section class="panel chart-panel">
         <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
