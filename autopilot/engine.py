@@ -145,7 +145,7 @@ class AutopilotEngine:
         self.log = log
 
         tf = strategy.timeframe or "1h"
-        self.cadence_s = int(cadence_s if cadence_s else _CADENCE.get(tf, 60))
+        self.cadence_s = int(cadence_s if cadence_s is not None else _CADENCE.get(tf, 60))
         self.bar_seconds = int(bar_seconds if bar_seconds else _TF_SECONDS.get(tf, 3600))
 
         self.drawdown = DrawdownBreaker(breaker_max_drawdown_pct)
@@ -169,7 +169,18 @@ class AutopilotEngine:
         self._last_ts = self.state.last_ts
         self._prev_close = float("nan")
         self._halt_reason = ""
-        self._first_tick = True  # 进程启动后第一根新 bar 不调仓（等下根收盘）
+        # 恢复 state 时把末根持仓/权益/entry/收盘价喂回 backend（paper SimBackend），
+        # 并恢复 _prev_close 让首根新 bar 的 mark_to_market 计入 carry、权益不断层。
+        # 否则 SimBackend 新建重置 position=0/equity=start_equity，restart 后持仓/权益丢失。
+        if self.state.history:
+            last = self.state.history[-1]
+            self.backend.restore(
+                float(last["actual_notional"]),
+                float(last["equity"]),
+                float(last["entry_price"]),
+                float(last["close"]),
+            )
+            self._prev_close = float(last["close"])
         # 非 None 时处理完这么多根新 bar 后退出（冒烟/冒烟测试用；None=永久运行）
         self._max_bars = max_bars
 
@@ -229,8 +240,6 @@ class AutopilotEngine:
         if cur_ts == self._last_ts:
             return
         is_first = self._last_ts == 0
-        first_tick = self._first_tick
-        self._first_tick = False
         self._last_ts = cur_ts
 
         # 3. 信号（与回测同路径）
@@ -241,9 +250,9 @@ class AutopilotEngine:
             return
 
         # 4. 盘前 mark-to-market（上一期持仓 × close-to-close 收益；交易所后端 no-op）
-        #    首根、或恢复 state 后首根（_prev_close 仍为 NaN）都用 (cur,cur)：pnl=0 不动
-        #    权益，但初始化 SimBackend._last_close，使首单 place_delta_order 拿到当根
-        #    收盘作 fill 价——否则恢复后第一条成交价=0、entry 卡 0、未实现盈亏失真。
+        #    fresh start（is_first）或 _prev_close 未就绪时用 (cur,cur)：pnl=0 不动权益，
+        #    但初始化 _last_close 作首单 fill 价；恢复 state 后 _prev_close 已从末根 close
+        #    回填（见 __init__），走 (prev,cur) 计入 carry、权益连续。
         if is_first or self._prev_close != self._prev_close:  # NaN 检查（prev 未就绪）
             self.backend.mark_to_market(cur_close, cur_close)
         else:
@@ -273,14 +282,14 @@ class AutopilotEngine:
             return
 
         # 6. 对账自愈（ADR-0006）：delta 以交易所实际持仓为准
-        #    首根（is_first）不调仓：启动只记录最近已收盘 bar 的 target，等下一根新 bar
-        #    收盘后才第一次调仓（避免一点启动就立刻进场；已收盘信号仍照常计算记录）。
+        #    首根新 bar 即调仓（fresh start 进场 / restart 恢复后立即对账回 target）。
+        #    warmup 由 _MIN_BARS 兜底、forming bar 由 _ensure_closed_bars 兜底，无需延迟首调仓。
         target_notional = target_pos * equity
         actual, entry_before, unreal = self.backend.fetch_position_detail(self.strategy.symbol)
         delta = target_notional - actual
         fill_ok = True
         entry = entry_before  # 不调仓时 entry 不变
-        if not first_tick and abs(delta) > 0 and abs(delta) >= self.min_delta:
+        if abs(delta) > 0 and abs(delta) >= self.min_delta:
             res: OrderResult = self.backend.place_delta_order(self.strategy.symbol, delta)
             fill_ok = res.ok
             actual, entry, unreal = self.backend.fetch_position_detail(self.strategy.symbol)
@@ -289,8 +298,7 @@ class AutopilotEngine:
                 before=actual - res.filled_notional, after=actual,
                 entry=entry, entry_before=entry_before,
             )
-        if not first_tick:
-            self.monitors.observe(actual, target_notional, fill_ok)
+        self.monitors.observe(actual, target_notional, fill_ok)
 
         self._record(
             cur_ts, cur_close, target_pos, target_notional, actual, equity, peak, dd,

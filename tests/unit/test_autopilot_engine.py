@@ -211,40 +211,80 @@ def test_engine_records_entry_unrealized_and_trades(tmp_path):
 
 
 def test_engine_first_tick_initializes_last_close(tmp_path):
-    """首根 tick：mark_to_market(cur,cur) 初始化 _last_close；但首根【不调仓】（等下根收盘）。"""
+    """首根 tick：mark_to_market(cur,cur) 初始化 _last_close（防 entry 卡 0 regression）。
+
+    去 first_tick 闸后首根即调仓进场（不再延迟到下根）。
+    """
     from autopilot.backends import SimBackend
 
     be = SimBackend(start_equity=1.0, cost_rate=0.0)
     eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=1)
     eng.run_forever()
-    # 首根 mark 跑了 → _last_close 就绪；但首根不调仓 → 持仓为 0、无成交
+    # 首根 mark(cur,cur) 被调 → _last_close 就绪（防 entry 卡 0）
     assert be._last_close > 0
-    assert abs(be._position_notional) < 1e-9  # 首根不进场
-    assert len(eng.state.trades) == 0
+    # 去闸后首根即调仓：若 target≠0 则有成交进场
+    if eng.state.history:
+        target = eng.state.history[-1]["target_pos"]
+        if abs(target) > 1e-9:
+            assert len(eng.state.trades) > 0
 
 
 def test_engine_resume_initializes_last_close(tmp_path):
-    """恢复 state 后首根 tick：_last_close 被初始化（>0），不卡在 0。
+    """恢复 state 后：backend.restore 回填 _last_close/_prev_close，权益 carry 连续。
 
-    regression: 恢复时 is_first=False 且 _prev_close=NaN，旧代码两个 mark 分支都不走，
-    导致 _last_close 保持 __init__ 的 0 → 首条成交价=0、entry 卡 0、未实现盈亏失真。
+    regression: 旧代码恢复时 _prev_close=NaN 且 backend 未恢复，首根 mark 分支异常 →
+    _last_close 卡 0、entry 卡 0、未实现盈亏失真。现 __init__ 从末根 restore 回填。
     """
     from autopilot.backends import SimBackend
 
-    # 第一次跑产生 state
+    # 第一次跑产生 state（有 1 根 history）
     be1 = SimBackend(start_equity=1.0, cost_rate=0.0)
     eng1 = _make_engine(tmp_path, FakeSource(_pool()), be1, max_bars=1)
     eng1.run_forever()
     assert (tmp_path / "autopilot_state.json").exists()
-    # 恢复：新 backend（_last_close=0, _prev_close=NaN）；max_bars 要 > 已恢复 history 长度
-    # 注：恢复后进程首根新 bar 也不调仓（_first_tick），max_bars=3 让第 2 根新 bar 调仓
+    # 恢复：新 backend 经 __init__ restore 回填；max_bars=3 让再跑 2 根新 bar（首根即调仓）
     be2 = SimBackend(start_equity=1.0, cost_rate=0.0)
     eng2 = _make_engine(tmp_path, FakeSource(_pool()), be2, max_bars=3)
     eng2.run_forever()
-    # 恢复后首根 mark(cur,cur) 被调 → _last_close>0；若有调仓，fill 价/entry 也非 0
+    # restore 已回填 _last_close>0；fill 价/entry 也非 0
     assert be2._last_close > 0
     for t in eng2.state.trades:
         assert t["price"] > 0, f"恢复首根 fill 价为 0: {t}"
+
+
+def test_engine_restore_recovers_backend_state(tmp_path):
+    """restart 后新 SimBackend 从 state 末根恢复持仓/权益/entry/close（不再重置丢失）。"""
+    from autopilot.backends import SimBackend
+
+    # 第一次跑产生持仓
+    be1 = SimBackend(start_equity=10000.0, cost_rate=0.0003)
+    eng1 = _make_engine(tmp_path, FakeSource(_pool()), be1, max_bars=3)
+    eng1.run_forever()
+    last = eng1.state.history[-1]
+    # 第二次：新 SimBackend（内存重置）+ 恢复 state → __init__ restore 应回填 4 个字段
+    be2 = SimBackend(start_equity=10000.0, cost_rate=0.0003)
+    eng2 = _make_engine(tmp_path, FakeSource(_pool()), be2, max_bars=4)
+    assert be2._position_notional == pytest.approx(last["actual_notional"])
+    assert be2._equity == pytest.approx(last["equity"])
+    assert be2._entry_price == pytest.approx(last["entry_price"])
+    assert be2._last_close == pytest.approx(last["close"])
+
+
+def test_engine_restore_equity_no_reset(tmp_path):
+    """restart 后权益接续末根、不重置回 start_equity（权益曲线不断层）。"""
+    from autopilot.backends import SimBackend
+
+    be1 = SimBackend(start_equity=10000.0, cost_rate=0.0003)
+    eng1 = _make_engine(tmp_path, FakeSource(_pool()), be1, max_bars=5)
+    eng1.run_forever()
+    last_eq = eng1.state.history[-1]["equity"]
+    # 第二次恢复：equity 应接续末根，不回 start_equity
+    be2 = SimBackend(start_equity=10000.0, cost_rate=0.0003)
+    eng2 = _make_engine(tmp_path, FakeSource(_pool()), be2, max_bars=6)
+    assert be2._equity == pytest.approx(last_eq)
+    # 第一次确实产生了盈亏（equity 偏离 start_equity）→ 恢复后不得断层回 10000
+    if abs(last_eq - 10000.0) > 1e-9:
+        assert be2._equity != pytest.approx(10000.0)
 
 
 def test_classify_action():

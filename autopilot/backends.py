@@ -74,6 +74,15 @@ class ExecutionBackend(ABC):
     def close(self) -> None:  # noqa: B027 - 可选
         """释放资源（如 ccxt 连接）。"""
 
+    def restore(
+        self, position_notional: float, equity: float, entry_price: float, last_close: float
+    ) -> None:
+        """从持久化状态恢复后端内存字段。
+
+        仅 paper SimBackend 需要（持仓/权益是内存变量，restart 后须从 state 末根喂回）；
+        交易所后端 no-op——持仓/权益以交易所为准（ADR-0006），每根 bar 直接 fetch 读真实值。
+        """
+
 
 class SimBackend(ExecutionBackend):
     """paper 模式：本地模拟。
@@ -161,6 +170,15 @@ class SimBackend(ExecutionBackend):
 
     def flatten_all(self, symbol: str) -> OrderResult:
         return self.place_delta_order(symbol, -self._position_notional)
+
+    def restore(
+        self, position_notional: float, equity: float, entry_price: float, last_close: float
+    ) -> None:
+        """从 state 末根整体覆写内存字段（不走 _update_entry 的移动加权；恢复是整体回填）。"""
+        self._position_notional = float(position_notional)
+        self._equity = float(equity)
+        self._entry_price = float(entry_price)
+        self._last_close = float(last_close)
 
 
 class OKXBackend(ExecutionBackend):
