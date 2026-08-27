@@ -38,7 +38,7 @@ class FakeExchange:
 
     def market(self, symbol):
         return {
-            "symbol": symbol, "settle": "USDT",
+            "symbol": symbol, "settle": "USDT", "base": "BTC",
             "contractSize": self._cs,
             "limits": {"amount": {"min": self._min}, "cost": {"min": 0.0}},
             "precision": {"amount": 8},
@@ -179,3 +179,103 @@ def test_fetch_position_detail_short_signs():
 def test_fetch_position_detail_flat():
     be = _backend(FakeExchange())  # 无持仓
     assert be.fetch_position_detail("BTCUSDT") == (0.0, 0.0, 0.0)
+
+
+# ── 成交回执回读（下单后 fetch_order 拿真实均价/成交/手续费）──────────────────
+class ReceiptExchange(FakeExchange):
+    """create_order 返回订单 id，fetch_order 返回罐装成交回执。"""
+
+    def __init__(self, receipt: dict, **kw):
+        super().__init__(**kw)
+        self._receipt = receipt
+        self.fetch_calls: list[tuple] = []
+
+    def fetch_order(self, order_id, symbol):
+        self.fetch_calls.append((order_id, symbol))
+        return dict(self._receipt)
+
+
+def test_place_delta_uses_real_fill_receipt():
+    """closed 回执：filled_notional/price/fee 全部来自交易所回执，不再估算。"""
+    ex = ReceiptExchange(
+        {"status": "closed", "average": 101.0, "filled": 5,
+         "fee": {"cost": 2.5, "currency": "USDT"}},
+        last_price=100.0, contract_size=1.0, min_amount=1.0,
+    )
+    be = _backend(ex)
+    res = be.place_delta_order("BTCUSDT", 500.0)   # 请求买 5 张
+    assert res.ok and "confirmed" in res.message
+    assert res.filled_notional == pytest.approx(505.0)   # 5 × 101 × 1（真实均价）
+    assert res.price == pytest.approx(101.0)
+    assert res.fee == pytest.approx(2.5)
+    assert ex.fetch_calls and ex.fetch_calls[0][1] == "BTC/USDT:USDT"
+
+
+def test_place_delta_receipt_sell_signs_negative():
+    """卖方向回执：filled_notional 带负号。"""
+    ex = ReceiptExchange({"status": "closed", "average": 99.0, "filled": 3},
+                         last_price=100.0, contract_size=1.0, min_amount=1.0)
+    res = _backend(ex).place_delta_order("BTCUSDT", -300.0)
+    assert res.ok and res.filled_notional == pytest.approx(-297.0)
+    assert res.price == pytest.approx(99.0)
+
+
+def test_place_delta_rejected_reports_failure():
+    """回执 canceled/rejected 且零成交 → ok=False（engine 走执行熔断计数）。"""
+    ex = ReceiptExchange({"status": "canceled", "filled": 0},
+                         last_price=100.0, min_amount=1.0)
+    res = _backend(ex).place_delta_order("BTCUSDT", 500.0)
+    assert not res.ok
+    assert "未成交" in res.message
+
+
+def test_place_delta_partial_fill_records_part():
+    """部分成交（open/超时未完结）：ok=True 只记已成交部分并注明。"""
+    ex = ReceiptExchange({"status": "open", "average": 100.5, "filled": 2},
+                         last_price=100.0, contract_size=1.0, min_amount=1.0)
+    import autopilot.backends as bk
+
+    orig = bk.time.sleep
+    bk.time.sleep = lambda s: None  # 部分成交会轮询满 6 次，测试免真等
+    try:
+        res = _backend(ex).place_delta_order("BTCUSDT", 500.0)
+    finally:
+        bk.time.sleep = orig
+    assert res.ok
+    assert res.filled_notional == pytest.approx(201.0)   # 只记已成交 2 张
+    assert "部分成交" in res.message
+
+
+def test_fee_converts_base_currency_to_quote():
+    """手续费以 base 币（BTC）计价 → × 均价折算成 USDT 口径。"""
+    ex = ReceiptExchange(
+        {"status": "closed", "average": 101.0, "filled": 5,
+         "fee": {"cost": 0.01, "currency": "BTC"}},
+        last_price=100.0, contract_size=1.0, min_amount=1.0,
+    )
+    res = _backend(ex).place_delta_order("BTCUSDT", 500.0)
+    assert res.fee == pytest.approx(1.01)   # 0.01 BTC × 101
+
+
+def test_no_receipt_support_falls_back_to_estimate(monkeypatch):
+    """交易所不支持 fetch_order / 持续失败 → 回落 ticker 估算（旧行为）。"""
+    import autopilot.backends as bk
+
+    monkeypatch.setattr(bk.time, "sleep", lambda s: None)
+
+    class NoFetch(FakeExchange):
+        pass  # 无 fetch_order 属性
+
+    ex = NoFetch(last_price=100.0, contract_size=1.0, min_amount=1.0)
+    res = _backend(ex).place_delta_order("BTCUSDT", 500.0)
+    assert res.ok and res.filled_notional == pytest.approx(500.0)
+    assert "estimated" in res.message
+
+    class AlwaysRaise(FakeExchange):
+        def fetch_order(self, oid, symbol):
+            raise RuntimeError("net down")
+
+    res2 = _backend(AlwaysRaise(last_price=100.0, min_amount=1.0)).place_delta_order(
+        "BTCUSDT", 500.0)
+    assert res2.ok and res2.filled_notional == pytest.approx(500.0)
+    assert "estimated" in res2.message

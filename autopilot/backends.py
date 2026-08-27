@@ -10,6 +10,7 @@ ADR-0006：fetch_position_notional 以交易所为准，使连续调仓靠下根
 from __future__ import annotations
 
 import math
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -333,16 +334,7 @@ class OKXBackend(ExecutionBackend):
         if contracts == 0:
             return OrderResult(ok=True, filled_notional=0.0, message="delta 低于最小手")
         side = "buy" if contracts > 0 else "sell"
-        try:
-            self._ex.create_order(  # type: ignore[union-attr]
-                self._ccxt_symbol, "market", side, abs(contracts)
-            )
-        except Exception as exc:  # noqa: BLE001
-            return OrderResult(ok=False, filled_notional=0.0, message=f"下单失败: {exc}")
-        cs = self._contract_size()
-        return OrderResult(
-            ok=True, filled_notional=contracts * price * cs, price=price, message="market fill"
-        )
+        return self._market_order_confirmed(side, contracts, price)
 
     def flatten_all(self, symbol: str) -> OrderResult:
         # reduceOnly 市价全平：反向下等量合约
@@ -354,17 +346,104 @@ class OKXBackend(ExecutionBackend):
         if contracts == 0:
             return OrderResult(ok=False, message="平仓量低于最小手")
         side = "buy" if contracts > 0 else "sell"
+        result = self._market_order_confirmed(side, contracts, price, reduce_only=True)
+        if result.ok:
+            result.message = f"flatten {result.message}".strip()
+        else:
+            result.message = f"平仓{result.message}"
+        return result
+
+    # ── 下单 + 成交回执回读（账本真实化）────────────────────────────────
+    def _market_order_confirmed(
+        self, side: str, contracts: float, fallback_price: float,
+        reduce_only: bool = False,
+    ) -> OrderResult:
+        """市价单 → 回读成交回执（fetch_order 轮询），用真实均价/成交张数/手续费落账。
+
+        三态：
+          - 回执 closed      → ok=True，filled/price/fee 全真实
+          - 回执未完结(部分成交/超时) → ok=True 只记已成交部分，message 注明
+          - 回执 canceled/rejected 且零成交 → ok=False
+        无回读能力（mock 未实现 fetch_order / create_order 无 id）→ 回落 ticker 估算，
+        与旧行为一致；持仓真值仍由 ADR-0006 对账兜底，估算只影响审计精度不影响仓位。
+        """
+        direction = 1.0 if side == "buy" else -1.0
+        params = {"reduceOnly": True} if reduce_only else None
         try:
-            self._ex.create_order(  # type: ignore[union-attr]
-                self._ccxt_symbol, "market", side, abs(contracts),
-                None, {"reduceOnly": True},
+            res = self._ex.create_order(  # type: ignore[union-attr]
+                self._ccxt_symbol, "market", side, abs(contracts), None, params
             )
         except Exception as exc:  # noqa: BLE001 - reduceOnly 不被支持时退化为普通市价
+            if not reduce_only:
+                return OrderResult(ok=False, filled_notional=0.0, message=f"下单失败: {exc}")
             try:
-                self._ex.create_order(self._ccxt_symbol, "market", side, abs(contracts))  # type: ignore[union-attr]
+                res = self._ex.create_order(  # type: ignore[union-attr]
+                    self._ccxt_symbol, "market", side, abs(contracts)
+                )
             except Exception as exc2:  # noqa: BLE001
-                return OrderResult(ok=False, message=f"平仓失败: {exc2}")
-        return OrderResult(ok=True, filled_notional=-notional, price=price, message="flatten")
+                return OrderResult(ok=False, filled_notional=0.0, message=f"下单失败: {exc2}")
+        cs = self._contract_size()
+        oid = res.get("id") if isinstance(res, dict) else None
+        receipt = self._read_fill_receipt(oid)
+        if receipt is None:
+            # 无回读：按请求量 × ticker 价估算（fee 占位 0）
+            return OrderResult(
+                ok=True, filled_notional=direction * abs(contracts) * fallback_price * cs,
+                price=fallback_price, message="market fill (estimated)",
+            )
+        status = str(receipt.get("status") or "")
+        filled_c = abs(float(receipt.get("filled") or 0.0))
+        avg = float(receipt.get("average") or receipt.get("price") or 0.0) or fallback_price
+        if filled_c <= 1e-12 and status != "closed":
+            return OrderResult(ok=False, filled_notional=0.0,
+                               message=f"订单未成交: {status or 'unknown'}")
+        note = "" if status == "closed" else f" (部分成交 {status})"
+        return OrderResult(
+            ok=True,
+            filled_notional=direction * filled_c * avg * cs,
+            price=avg,
+            fee=self._fee_to_quote(receipt, avg),
+            message=f"confirmed {status}{note}".strip(),
+        )
+
+    def _read_fill_receipt(self, order_id: object) -> dict | None:
+        """轮询 fetch_order 拿成交回执。无回读/回读持续失败 → None（回落估算）。
+
+        OKX 市价单通常毫秒级完结；6 次 × 0.4s 只是极端拥堵时的上限。
+        """
+        if not order_id:
+            return None
+        fetch = getattr(self._ex, "fetch_order", None)
+        if fetch is None:
+            return None
+        last: dict | None = None
+        for _ in range(6):
+            try:
+                last = fetch(order_id, self._ccxt_symbol)  # type: ignore[operator]
+            except Exception:  # noqa: BLE001 - 单次回读失败重试，持续失败回落估算
+                time.sleep(0.3)
+                continue
+            status = str((last or {}).get("status") or "")
+            if status in ("closed", "canceled", "rejected", "expired"):
+                return last
+            time.sleep(0.4)
+        return last  # open/partial：调用方按已成交部分记账
+
+    def _fee_to_quote(self, receipt: dict, avg_price: float) -> float:
+        """手续费折算成计价币（USDT）：settle 直接用；base 计价 × 均价近似。"""
+        fee = receipt.get("fee") or {}
+        try:
+            cost = abs(float(fee.get("cost") or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+        cur = str(fee.get("currency") or "").upper()
+        settle = str((self._market or {}).get("settle") or "USDT").upper()
+        base = str((self._market or {}).get("base") or "").upper()
+        if not cur or cur == settle:
+            return cost
+        if base and cur == base and avg_price > 0:
+            return cost * avg_price
+        return cost
 
     def close(self) -> None:  # noqa: B027
         pass
