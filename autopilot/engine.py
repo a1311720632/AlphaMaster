@@ -212,6 +212,14 @@ class AutopilotEngine:
             strategy.symbol, backend.mode, ledger_dir
         )
         self.ledger = Ledger(lf, log=self.log)
+
+        # 冷账本（E1/ADR-0007）：bar/trade/event 三类行 append-only，审计视图读它。
+        # ledger_file 显式指定时用之（D2 离线补算隔离：自定义 state-file 必须配独立账本，
+        # 否则补算的 bar/trade 会污染生产审计与 readiness 门槛计数）
+        lf = Path(ledger_file) if ledger_file else ledger_path(
+            strategy.symbol, backend.mode, ledger_dir
+        )
+        self.ledger = Ledger(lf, log=self.log)
         self._event(
             "run_start",
             f"mode={backend.mode} symbol={strategy.symbol} tf={strategy.timeframe} "
@@ -227,6 +235,17 @@ class AutopilotEngine:
         self._hb_last_ok = 0.0
         # 每日摘要的上一根 bar UTC 日（B4：摘要兼心跳）
         self._last_day = ""
+
+        # 空账本首启保护（b 决策，testnet/live）：当前这根进行中的 bar 只观察不下单，
+        # 等【下一根】收盘 bar 才允许首次调仓。防止“点完启动冷不丁吃一单”——尤其
+        # 一键清除→立刻重启的序列会把同一根 bar 当两次新 bar 各打一枪。
+        # 已有账本的恢复启动不走此闸（其 last_ts 锁定同根 bar，天然等下根）。
+        self._defer_first_trade = (
+            not self.state.history and backend.mode in ("testnet", "live")
+        )
+        if self._defer_first_trade:
+            self.log("[autopilot] 空账本首启：本根 bar 仅观察，下一根收盘后开始调仓")
+            self._event("boot_defer", f"mode={backend.mode} 观察一根后进场")
 
     # ── 主循环 ─────────────────────────────────────────────────────────
     def run_forever(self) -> str:
@@ -305,6 +324,9 @@ class AutopilotEngine:
         if cur_ts == self._last_ts:
             return
         is_first = self._last_ts == 0
+        # 首启延迟闸：本根用局部快照判断（观察根不交易），闸的解除自下一根生效
+        deferred_now = self._defer_first_trade
+        self._defer_first_trade = False
         self._last_ts = cur_ts
 
         # 3. 信号（与回测同路径）
@@ -355,14 +377,16 @@ class AutopilotEngine:
             return
 
         # 6. 对账自愈（ADR-0006）：delta 以交易所实际持仓为准
-        #    首根新 bar 即调仓（fresh start 进场 / restart 恢复后立即对账回 target）。
-        #    warmup 由 _MIN_BARS 兜底、forming bar 由 _ensure_closed_bars 兜底，无需延迟首调仓。
+        #    首启延迟闸（b 决策）激活时本根只观察：不下单、不记漂移告警，
+        #    真实持仓若在也交给下根 bar 对账。
         target_notional = target_pos * equity
         actual, entry_before, unreal = self.backend.fetch_position_detail(self.strategy.symbol)
         delta = target_notional - actual
         fill_ok = True
         entry = entry_before  # 不调仓时 entry 不变
-        if abs(delta) > 0 and abs(delta) >= self.min_delta:
+        if deferred_now:
+            pass
+        elif abs(delta) > 0 and abs(delta) >= self.min_delta:
             # 执行熔断（B3/ADR-0007）：bar 内 3 连败即停机（不靠下根 bar 自愈——
             # 能穿透 3 次重试的失败基本是持久的：凭据吊销/保证金不足/账户限制）
             res, last_err = self._place_delta_with_retry(delta)
@@ -387,7 +411,9 @@ class AutopilotEngine:
                 before=actual - res.filled_notional, after=actual,
                 entry=entry, entry_before=entry_before,
             )
-        self.monitors.observe(actual, target_notional, fill_ok)
+            self.monitors.observe(actual, target_notional, fill_ok)
+        else:
+            self.monitors.observe(actual, target_notional, fill_ok)
 
         self._record(
             cur_ts, cur_close, target_pos, target_notional, actual, equity, peak, dd,

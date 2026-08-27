@@ -430,6 +430,59 @@ def test_engine_run_events_and_ledger_override(tmp_path):
     assert not (tmp_path / "autopilot_ledger_TEST_paper.jsonl").exists()
 
 
+class TestnetSimBackend(SimBackend):
+    """带下单计数的 testnet 模式替身（首启延迟闸测试）。"""
+
+    mode = "testnet"
+
+    def __init__(self):
+        super().__init__(start_equity=10000.0, cost_rate=0.0)
+        self.order_calls = 0
+
+    def place_delta_order(self, symbol, delta_notional):
+        self.order_calls += 1
+        return OrderResult(ok=True, filled_notional=delta_notional, price=100.0,
+                           message="sim fill")
+
+
+def test_fresh_testnet_start_defers_first_trade(tmp_path):
+    """(b)：空账本首启的 testnet/live——本根 bar 只观察，不立即下单。"""
+    be = TestnetSimBackend()
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=1)
+    assert eng._defer_first_trade
+    eng.run_forever()
+
+    assert be.order_calls == 0                    # 观察根绝不下单
+    assert len(eng.state.history) == 1            # 但照常记录 bar（target 可见）
+    assert not eng._defer_first_trade             # 消费后闸已解除
+
+
+def test_fresh_paper_start_not_deferred(tmp_path):
+    """paper 空账本不走延迟闸（模拟成交无害、行为对齐回测节奏不变）。"""
+    from autopilot.backends import SimBackend as SB
+
+    be = SB(start_equity=1.0, cost_rate=0.0)
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=1)
+    assert not eng._defer_first_trade
+
+
+def test_restored_testnet_start_not_deferred(tmp_path):
+    """已有账本的恢复启动不受延迟闸影响——其同根 bar 天然 early-return 等下根。"""
+    from autopilot.state import AutopilotState, BarRecord
+
+    st = AutopilotState(symbol="TEST", timeframe="1h", mode="testnet",
+                        peak_equity=106000.0, last_ts=1_700_000_000 + 299 * 3600,
+                        start_equity=106000.0)
+    st.record(BarRecord(ts=1_700_000_000 + 299 * 3600, close=100.0, target_pos=0.5,
+                        target_notional=53000.0, actual_notional=53000.0,
+                        equity=106000.0, peak_equity=106000.0, drawdown_pct=0.0))
+    st.save(tmp_path / "autopilot_state.json")
+
+    be = TestnetSimBackend()
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=1)
+    assert not eng._defer_first_trade
+
+
 def test_classify_action():
     """动作分类：开仓/加仓/减仓/平仓/反手（成交记录校验开平仓逻辑的基础）。"""
     from autopilot.engine import _classify_action
