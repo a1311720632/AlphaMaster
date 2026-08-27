@@ -52,6 +52,36 @@ def _build_backend(mode: str, symbol: str) -> object:
     )
 
 
+def _build_datasource() -> object:
+    """备用源链装配（B2/ADR-0007）：链配置 AUTOPILOT_FALLBACK_CHAIN，默认 okx,bybit,binance。"""
+    from web.data_sources.fallback_source import FallbackDataSource
+
+    kinds = [k.strip().lower() for k in Config.AUTOPILOT_FALLBACK_CHAIN.split(",") if k.strip()]
+    sources = []
+    for kind in kinds:
+        try:
+            if kind == "okx":
+                sources.append(OKXSource())
+            elif kind == "bybit":
+                from web.data_sources.bybit_source import BybitSource
+
+                sources.append(BybitSource())
+            elif kind == "binance":
+                from web.data_sources.binance_source import BinanceSource
+
+                sources.append(BinanceSource())
+            else:
+                _log(f"[autopilot] 未知备源 kind={kind}，跳过")
+        except Exception as exc:  # noqa: BLE001 - 单源构造失败不阻断整链
+            _log(f"[autopilot] 备源 {kind} 构造失败，从链中摘除: {exc}")
+    if not sources:
+        _log("[autopilot] 备源链为空，回落单源 OKX")
+        return OKXSource()
+    if len(sources) == 1:
+        return sources[0]
+    return FallbackDataSource(sources, max_fails_per_source=Config.AUTOPILOT_FALLBACK_MAX_FAILS)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="AlphaMaster 自动驾驶（第四步）")
     p.add_argument("--strategy-file", required=True, help="策略 best_{symbol}.json 路径")
@@ -66,6 +96,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="处理完这么多根新 bar 后退出（冒烟测试用；不填=永久运行）",
+    )
+    p.add_argument(
+        "--state-file",
+        default=None,
+        help="覆盖 state 文件路径（默认 Config.AUTOPILOT_STATE_FILE）。"
+             "D2 离线补算 paper 对照时传独立文件，避免覆盖 testnet 账本/触发归档",
     )
     args = p.parse_args(argv)
 
@@ -100,11 +136,11 @@ def main(argv: list[str] | None = None) -> int:
         f"formula_len={len(strategy.formula)}"
     )
 
-    # 2. 行情源
+    # 2. 行情源（备用源链 B2/ADR-0007：OKX → Bybit → Binance，全挂才断连熔断）
     if args.exchange != "okx":
         _log(f"[autopilot] 暂不支持交易所 {args.exchange}（v1 仅 okx）")
         return 2
-    datasource = OKXSource()
+    datasource = _build_datasource()
 
     # 3. 执行后端
     try:
@@ -113,7 +149,12 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"[autopilot] 后端初始化失败: {exc}")
         return 2
 
-    # 4. 引擎
+    # 4. 告警（B4/ADR-0007）：引擎内直调飞书；webhook 未配置时 Alerter 只 log
+    from autopilot.alerts import Alerter
+
+    alerter = Alerter(log=_log)
+
+    # 5. 引擎
     engine = AutopilotEngine(
         strategy=strategy,
         datasource=datasource,
@@ -122,13 +163,21 @@ def main(argv: list[str] | None = None) -> int:
         breaker_max_drawdown_pct=Config.AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT,
         breaker_max_bars_stale=Config.AUTOPILOT_BREAKER_MAX_BARS_STALE,
         min_notional_delta=Config.AUTOPILOT_MIN_NOTIONAL_DELTA,
-        state_path=Config.AUTOPILOT_STATE_FILE,
+        state_path=args.state_file or Config.AUTOPILOT_STATE_FILE,
         stop_signal_paths=[Config.AUTOPILOT_STOP_SIGNAL, Config.STOP_SIGNAL],
         max_bars=args.max_bars,
+        ledger_dir=Config.AUTOPILOT_LEDGER_DIR or None,
+        alerter=alerter,
+        heartbeat_url=Config.AUTOPILOT_HEARTBEAT_URL,
+        heartbeat_max_silent_s=Config.AUTOPILOT_HEARTBEAT_MAX_SILENT_S,
         log=_log,
     )
     reason = engine.run_forever()
-    clean = reason.startswith("STOP_SIGNAL") or reason.startswith("max_bars") or reason == "stopped"
+    clean = (
+        reason.startswith("STOP_SIGNAL")
+        or reason.startswith("max_bars")
+        or reason == "stopped"
+    )
     return 0 if clean else 1
 
 

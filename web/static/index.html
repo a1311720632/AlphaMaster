@@ -569,7 +569,7 @@
     <section class="panel launch-panel">
       <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
       <span class="hud-corner bl"></span><span class="hud-corner br"></span>
-      <h2>自动驾驶（第四步）</h2>
+      <h2>自动驾驶（第四步） <span id="apEngineBadge" style="font-size:12px;font-weight:400;vertical-align:middle;margin-left:8px;">●</span></h2>
       <div class="launch-form launch-form-file">
         <div class="launch-row launch-row-main">
           <select id="apStrategySelect" style="min-width:240px;max-width:60%" title="从已保存的策略中选（headless 服务器用这个；本机桌面也可点「选择策略」弹框）">
@@ -600,7 +600,34 @@
           <button class="btn btn-danger" id="apStopBtn" disabled>停止</button>
           <button class="btn btn-secondary" id="apResetBtn" title="停止自动驾驶并清空所有历史记录，权益回到初始">一键清除</button>
         </div>
-        <small class="field-hint">连续仓位·对齐回测（无单笔止盈止损）；testnet/live 需 <code>ccxt</code> + OKX 凭据（见 <code>.env</code>）。停机靠账户级回撤/断网熔断。</small>
+        <small class="field-hint">连续仓位·对齐回测（无单笔止盈止损）；testnet/live 启动前会跑预检（ccxt/凭据/账本匹配）。停机靠回撤/断网/执行熔断。</small>
+      </div>
+    </section>
+
+    <section class="panel chart-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head"><h2>飞书通知</h2>
+        <span class="hint" id="apFeishuStatusHint">未配置 · 告警仅入冷账本</span>
+      </div>
+      <div class="rt-feishu-form" style="padding:0 4px 6px;">
+        <label class="rt-feishu-enable">
+          <input type="checkbox" id="apFeishuEnabled" checked />
+          <span>启用自动驾驶告警推送</span>
+        </label>
+        <label class="rt-field rt-field-wide">
+          <span>Webhook URL（与实时分析页共用）</span>
+          <input type="text" id="apFeishuWebhook" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…" autocomplete="off" />
+        </label>
+        <label class="rt-field rt-field-wide">
+          <span>签名密钥（可选）</span>
+          <input type="password" id="apFeishuSecret" placeholder="机器人开启签名校验时填写，否则留空" autocomplete="off" />
+        </label>
+        <div class="rt-actions rt-feishu-actions">
+          <button type="button" class="btn btn-secondary" id="apFeishuTestBtn">发送测试</button>
+          <button type="button" class="btn btn-primary" id="apFeishuSaveBtn">保存</button>
+        </div>
+        <small class="field-hint">推回撤熔断、执行熔断、断连熔断、行情源切换与每日收益日报；进程崩溃重启时由看板进程代发。web 服务器挂掉也能从交易子进程发出。</small>
       </div>
     </section>
 
@@ -683,6 +710,21 @@
       <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
       <span class="hud-corner bl"></span><span class="hud-corner br"></span>
       <div class="panel-head">
+        <h2>系统健康</h2>
+        <span class="hint">现价为 OKX 直连，与行情源独立 · 事件读冷账本</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px 16px;font-size:13px;margin-bottom:10px;">
+        <div><span style="opacity:.7">引擎状态</span><br><b id="apHealthEngine">—</b></div>
+        <div><span style="opacity:.7">halt 原因</span><br><b id="apHealthHalt">—</b></div>
+        <div><span style="opacity:.7">watchdog 心跳</span><br><b id="apHealthHb">—</b></div>
+      </div>
+      <div id="apEventsTimeline" class="log-view" style="max-height:180px;font-size:12px;line-height:1.7;">等待事件…</div>
+    </section>
+
+    <section class="panel bt-table-panel">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head">
         <h2>成交记录</h2>
         <span class="hint" id="apFillsHint">—</span>
       </div>
@@ -708,6 +750,28 @@
       </div>
     </section>
     </div><!-- /page-autopilot -->
+
+    <div class="modal" id="apLiveConfirmModal" hidden>
+      <div class="modal-backdrop" data-close-ap-live></div>
+      <div class="modal-card" role="dialog" aria-labelledby="apLiveConfirmTitle" style="max-width:520px;">
+        <h3 id="apLiveConfirmTitle">确认启动实盘</h3>
+        <div class="modal-body">
+          <div id="apLiveConfirmMeta" style="font-size:13px;margin-bottom:10px;"></div>
+          <ul id="apPreflightList" style="list-style:none;padding:0;margin:0 0 12px;font-size:13px;"></ul>
+          <div style="color:#f87171;font-size:12px;margin-bottom:10px;">
+            真实资金 · 回撤熔断 −10% · 无单笔止盈止损（连续仓位模型）
+          </div>
+          <label class="field-inline" style="width:100%;">
+            输入品种名确认（如 <code id="apLiveConfirmSymbolHint">BTCUSDT</code>）
+            <input type="text" id="apLiveConfirmInput" style="margin-top:4px;" autocomplete="off" />
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" data-close-ap-live>取消</button>
+          <button type="button" class="btn btn-danger" id="apLiveConfirmBtn" disabled>启动实盘</button>
+        </div>
+      </div>
+    </div>
 
     <div class="modal" id="rtFeishuHelpModal" hidden>
       <div class="modal-backdrop" data-close-feishu-help></div>

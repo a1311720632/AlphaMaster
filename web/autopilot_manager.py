@@ -424,6 +424,7 @@ class AutopilotManager:
                 f"watcher: 终结 state={job_state} code={exit_code} "
                 f"reason={reason!r} stopped_by_user={stopped_by_user} → {action}"
             )
+            self._notify_watcher_event(job, job_state, exit_code, reason, action)
 
             if action == "stay_down":
                 save_settings({"autopilot_intended_running": False})
@@ -455,15 +456,33 @@ class AutopilotManager:
                         _log("watcher: 连续 5 次失败，放弃，已清意图标志")
                         break
 
+    def _notify_watcher_event(self, job, job_state, exit_code, reason, action) -> None:
+        """watcher 检测到进程终结 → 飞书知会（🟡 级，B4/ADR-0007）。失败静默。"""
+        try:
+            from web.feishu_notify import send_text
+
+            sym = job.symbol if job else "?"
+            mode = job.mode if job else "?"
+            text = (
+                f"[autopilot-watcher][{sym}/{mode}] 进程退出: state={job_state} "
+                f"code={exit_code} reason={reason or '-'} → {action}"
+            )
+            send_text(text)
+        except Exception:  # noqa: BLE001 - 知会失败绝不影响 watcher 主逻辑
+            pass
+
     def _classify_exit(
         self, stopped_by_user: bool, exit_code: int | None, reason: str
     ) -> str:
-        """终结态 → 'stay_down' | 'relaunch'（权威表见部署 plan）。
-        stay_down：用户 stop / 回撤熔断 / STOP_SIGNAL / 干净退出(exit 0)。
-        relaunch：断网熔断 / 未知崩溃(code>0) / 信号死亡(code<0)。"""
+        """终结态 → 'stay_down' | 'relaunch'（权威表见部署 plan + ADR-0007）。
+        stay_down：用户 stop / 回撤熔断 / 执行熔断 / STOP_SIGNAL / 干净退出(exit 0)。
+        relaunch：断网熔断 / 未知崩溃(code>0) / 信号死亡(code<0)。
+        执行熔断 stay_down 理由：能穿透 bar 内 3 次重试的失败基本是持久的
+        （凭据吊销/保证金不足），重拉无意义且刷屏——资金安全的终点是人。"""
         if stopped_by_user:
             return "stay_down"
-        if reason.startswith("回撤熔断") or reason.startswith("STOP_SIGNAL"):
+        if (reason.startswith("回撤熔断") or reason.startswith("执行熔断")
+                or reason.startswith("STOP_SIGNAL")):
             return "stay_down"
         if exit_code == 0:
             return "stay_down"

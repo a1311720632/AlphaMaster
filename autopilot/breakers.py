@@ -27,12 +27,16 @@ class BreakerStatus:
 
 
 class DrawdownBreaker:
-    """峰值权益回撤熔断。trip 后恒 tripped（不可自愈，需人工重置）。"""
+    """峰值权益回撤熔断。trip 后恒 tripped（不可自愈，需人工重置）。
 
-    def __init__(self, max_drawdown_pct: float) -> None:
+    initial_peak（B1/ADR-0007）：进程重启时回填上次运行留下的峰值权益，使回撤基线
+    跨重启连续——否则每次重启白送一次新的 −10% 额度（peak 从 -inf 重新起算）。
+    """
+
+    def __init__(self, max_drawdown_pct: float, initial_peak: float | None = None) -> None:
         # max_drawdown_pct 为负数，如 -0.10
         self._threshold = float(max_drawdown_pct)
-        self._peak = float("-inf")
+        self._peak = float(initial_peak) if (initial_peak is not None and initial_peak > 0) else float("-inf")
         self._tripped = False
         self._reason = ""
 

@@ -19,8 +19,10 @@ _DEFAULT = {
     "bt_slippage_pct": 0.01,
     # 实时分析监控清单：[{source, symbol, timeframe, strategy_file}, ...]
     "realtime_watches": [],
-    # 飞书机器人（信号转折提醒，仅文本）
+    # 飞书机器人（信号转折提醒，仅文本）；autopilot_enabled = 自动驾驶告警开关
+    # （默认 True：熔断/源切换/日报属安全告警，B4 决策全上；webhook 未配置时本就不发）
     "feishu_enabled": False,
+    "feishu_autopilot_enabled": True,
     "feishu_webhook_url": "",
     "feishu_secret": "",
     # tqsdk 天勤量化账号（国内期货实时数据源）
@@ -149,6 +151,7 @@ def load_settings() -> dict:
             )
     out["realtime_watches"] = cleaned
     out["feishu_enabled"] = bool(out.get("feishu_enabled", False))
+    out["feishu_autopilot_enabled"] = bool(out.get("feishu_autopilot_enabled", True))
     out["feishu_webhook_url"] = str(out.get("feishu_webhook_url") or "").strip()
     out["feishu_secret"] = str(out.get("feishu_secret") or "").strip()
     out["tqsdk_user"] = str(out.get("tqsdk_user") or "").strip()
@@ -222,6 +225,8 @@ def save_settings(data: dict) -> dict:
         current["realtime_watches"] = cleaned
     if "feishu_enabled" in data:
         current["feishu_enabled"] = bool(data["feishu_enabled"])
+    if "feishu_autopilot_enabled" in data:
+        current["feishu_autopilot_enabled"] = bool(data["feishu_autopilot_enabled"])
     if "feishu_webhook_url" in data:
         current["feishu_webhook_url"] = str(data["feishu_webhook_url"] or "").strip()
     if "feishu_secret" in data:

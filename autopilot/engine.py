@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import math
 import time
+import urllib.request
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -20,9 +23,11 @@ from model_core.vm import StackVM
 from strategy_manager.signal import compute_target_positions_stateless
 from web.data_sources.base import Bar, DataSource, bars_to_raw_dict
 
+from autopilot.alerts import Alerter
 from autopilot.backends import ExecutionBackend, OrderResult
 from autopilot.breakers import ConnectivityBreaker, DrawdownBreaker, Monitors
-from autopilot.state import AutopilotState, BarRecord
+from autopilot.ledger import Ledger, ledger_path
+from autopilot.state import AutopilotState, BarRecord, archive_if_mismatch
 from autopilot.strategy_loader import StrategySpec
 
 # 词表驱动、构造后无状态；进程内复用（与 strategy_manager/live_signal.py 同样的单例模式）
@@ -133,6 +138,11 @@ class AutopilotEngine:
         cadence_s: int | None = None,
         bar_seconds: int | None = None,
         max_bars: int | None = None,
+        ledger_dir: str | Path | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
+        alerter: Alerter | None = None,
+        heartbeat_url: str = "",
+        heartbeat_max_silent_s: int = 900,
         log: Callable[[str], None] = print,
     ) -> None:
         self.strategy = strategy
@@ -152,10 +162,20 @@ class AutopilotEngine:
         self.connectivity = ConnectivityBreaker(breaker_max_bars_stale)
         self.monitors = Monitors()
 
+        # 三元组不匹配先归档（C2/ADR-0007）：换模式/品种/周期 = 换一笔钱，旧账本留档
+        bak = archive_if_mismatch(
+            self.state_path, strategy.symbol, strategy.timeframe, backend.mode
+        )
+        if bak:
+            self.log(f"[autopilot] 旧账本三元组不匹配，已归档: {bak}")
+
         # 恢复或新建状态
         loaded = AutopilotState.load(self.state_path)
         if loaded and loaded.symbol == strategy.symbol and loaded.timeframe == strategy.timeframe:
             self.state = loaded
+            # B1/ADR-0007：回填 peak 使回撤基线跨重启连续——重启进程 ≠ 重置熔断额度
+            if loaded.peak_equity > 0:
+                self.drawdown = DrawdownBreaker(breaker_max_drawdown_pct, loaded.peak_equity)
             self.log(
                 f"[autopilot] 恢复状态: last_ts={loaded.last_ts} peak={loaded.peak_equity:.6f}"
             )
@@ -184,6 +204,21 @@ class AutopilotEngine:
         # 非 None 时处理完这么多根新 bar 后退出（冒烟/冒烟测试用；None=永久运行）
         self._max_bars = max_bars
 
+        # 冷账本（E1/ADR-0007）：bar/trade/event 三类行 append-only，审计视图读它
+        self.ledger = Ledger(
+            ledger_path(strategy.symbol, backend.mode, ledger_dir), log=self.log
+        )
+        # 可注入 sleep（下单重试间隔；测试传 no-op 免真等 2s）
+        self._sleep = sleep_fn if sleep_fn is not None else time.sleep
+        # 告警（B4/ADR-0007）：None = 无告警（paper 冒烟不配飞书也能跑）
+        self.alerter = alerter
+        # 心跳（B5/ADR-0007）：外部 watchdog ping；空 URL = 禁用
+        self._hb_url = (heartbeat_url or "").strip()
+        self._hb_max_silent = int(heartbeat_max_silent_s)
+        self._hb_last_ok = 0.0
+        # 每日摘要的上一根 bar UTC 日（B4：摘要兼心跳）
+        self._last_day = ""
+
     # ── 主循环 ─────────────────────────────────────────────────────────
     def run_forever(self) -> str:
         """主循环。返回 halt 原因（熔断 / STOP_SIGNAL / 异常）。"""
@@ -209,6 +244,7 @@ class AutopilotEngine:
                 break
             time.sleep(self.cadence_s)
         self.log(f"[autopilot] 结束 reason={self._halt_reason or 'stopped'}")
+        self.ledger.close()
         return self._halt_reason or "stopped"
 
     # ── 单次轮询 ───────────────────────────────────────────────────────
@@ -224,14 +260,33 @@ class AutopilotEngine:
         except Exception as exc:  # noqa: BLE001 - 任何拉取失败都计入断网熔断
             self.log(f"[autopilot] 行情拉取失败: {exc}")
             if self.connectivity.fail():
+                # 备源全挂（B2：链全失败才走到这）→ 🔴 级告警再停
+                self._alert_critical(
+                    "断连熔断（备源全挂）",
+                    f"{self.connectivity.reason}。持仓保持现状（未平仓），请人工检查网络/交易所。",
+                )
+                self._event("breaker_connectivity", str(exc))
                 self._halt(self.connectivity.reason)
             return
 
         bars = _ensure_closed_bars(bars)
         if len(bars) < _MIN_BARS:
             self.log(f"[autopilot] bar 不足 {len(bars)}/{_MIN_BARS}，等待 warmup")
+            self._maybe_heartbeat()
             return
         self.connectivity.reset()
+        # 备源链切换事件消费（B2/ADR-0007）：拉取式——读后置 None，避免回调侵入
+        sw = getattr(self.datasource, "last_switch", None)
+        if sw:
+            self.datasource.last_switch = None  # type: ignore[attr-defined]
+            frm, to, _ = sw
+            self._event("source_switch", f"{frm} → {to}")
+            self._notify(
+                "source_switch",
+                f"[autopilot][{self.strategy.symbol}] 行情源切换: {frm} → {to}",
+            )
+        # 无新 bar 的 cadence 轮也喂心跳（低频周期/休市防饿死，B5）
+        self._maybe_heartbeat()
 
         cur_ts = int(bars[-1].ts)
         cur_close = float(bars[-1].close)
@@ -274,6 +329,14 @@ class AutopilotEngine:
                 before=actual - res.filled_notional, after=actual,
                 entry=entry, entry_before=entry_before, reason="breaker_flatten",
             )
+            if not res.ok:
+                # 全平失败（最凶险）：halt 前强制告警——仓位在场内且马上无人照看
+                self._alert_critical(
+                    "回撤熔断但全平失败",
+                    f"回撤 {dd * 100:.2f}% 触发熔断，但 flatten_all 失败（{res.message}）。"
+                    f"仓位仍在场内: {actual:+.4f} USDT，请人工立即处理。",
+                )
+            self._event("breaker_drawdown", f"flatten ok={res.ok} detail={res.message}")
             self._halt(self.drawdown.reason)
             self._record(
                 cur_ts, cur_close, target_pos, target_pos * equity, actual, equity, peak, dd,
@@ -290,8 +353,24 @@ class AutopilotEngine:
         fill_ok = True
         entry = entry_before  # 不调仓时 entry 不变
         if abs(delta) > 0 and abs(delta) >= self.min_delta:
-            res: OrderResult = self.backend.place_delta_order(self.strategy.symbol, delta)
+            # 执行熔断（B3/ADR-0007）：bar 内 3 连败即停机（不靠下根 bar 自愈——
+            # 能穿透 3 次重试的失败基本是持久的：凭据吊销/保证金不足/账户限制）
+            res, last_err = self._place_delta_with_retry(delta)
             fill_ok = res.ok
+            if not res.ok:
+                self._alert_critical(
+                    "执行熔断",
+                    f"下单 3 连败已停机。目标 {target_notional:+.4f} / 实际 {actual:+.4f} USDT，"
+                    f"delta {delta:+.4f}。最近错误: {last_err}。仓位保持现状，请人工处理。",
+                )
+                self._event("breaker_execution", f"delta={delta:+.4f} err={last_err}")
+                actual, entry, unreal = self.backend.fetch_position_detail(self.strategy.symbol)
+                self._halt(f"执行熔断: {last_err}")
+                self._record(
+                    cur_ts, cur_close, target_pos, target_notional, actual, equity, peak, dd,
+                    entry_price=entry, unrealized_pnl=unreal,
+                )
+                return
             actual, entry, unreal = self.backend.fetch_position_detail(self.strategy.symbol)
             self._record_trade(
                 res, cur_ts,
@@ -306,6 +385,39 @@ class AutopilotEngine:
         )
 
     # ── 辅助 ───────────────────────────────────────────────────────────
+    def _place_delta_with_retry(
+        self, delta: float, attempts: int = 3, interval_s: float = 2.0
+    ) -> tuple[OrderResult, str]:
+        """bar 内下单重试（B3/ADR-0007）。全败返回 (失败 OrderResult, 聚合错误)。
+
+        ok=True（含"delta 低于最小手"这类成功空单）直接返回；连打 3 发打的是同一扇门，
+        interval_s 留间隔才有意义（可注入 sleep_fn 供测试）。
+        """
+        last_err = ""
+        for i in range(max(1, attempts)):
+            res = self.backend.place_delta_order(self.strategy.symbol, delta)
+            if res.ok:
+                return res, ""
+            last_err = res.message or f"attempt {i + 1}"
+            self.log(f"[autopilot] 下单失败({i + 1}/{attempts}): {last_err}")
+            if i + 1 < attempts:
+                self._sleep(interval_s)
+        return res, last_err
+
+    def _alert_critical(self, title: str, detail: str) -> None:
+        """关键告警（B4/ADR-0007）：飞书必发（critical 无节流）+ 冷账本留痕。"""
+        self.log(f"[autopilot] [CRITICAL] {title}: {detail}")
+        self._event("alert_critical", f"{title}: {detail}")
+        if self.alerter is not None:
+            self.alerter.send(title, f"[autopilot][{self.strategy.symbol}] {title}\n{detail}",
+                              critical=True)
+
+    def _notify(self, key: str, text: str) -> None:
+        """知会类告警（🟡 级，节流）：源切换/halt 兜底等。"""
+        self.log(f"[autopilot] [notify] {text}")
+        if self.alerter is not None:
+            self.alerter.send(key, text)
+
     def _record_trade(
         self, res: OrderResult, ts: int, *,
         before: float, after: float, entry: float, entry_before: float,
@@ -320,7 +432,7 @@ class AutopilotEngine:
             return
         realized = _realized_pnl(before, res.filled_notional, res.price, entry_before)
         direction = "多" if after > 0 else "空" if after < 0 else "平"
-        self.state.record_trade({
+        row = {
             "ts": ts,
             "action": _classify_action(before, after),
             "direction": direction,
@@ -333,7 +445,9 @@ class AutopilotEngine:
             "entry": float(entry),
             "realized": float(realized),
             "reason": reason,
-        })
+        }
+        self.state.record_trade(row)
+        self.ledger.append("trade", row)
 
     def _record(
         self,
@@ -362,6 +476,8 @@ class AutopilotEngine:
             unrealized_pnl=unrealized_pnl,
         )
         self.state.record(rec)
+        self.ledger.append("bar", asdict(rec))
+        self._maybe_daily_digest(ts, equity, dd)
         self._save()
         self.log(
             f"[autopilot] ts={ts} pos={target_pos:+.4f} "
@@ -378,10 +494,71 @@ class AutopilotEngine:
         except OSError as exc:  # noqa: BLE001
             self.log(f"[autopilot] 状态保存失败: {exc}")
 
+    def _event(self, name: str, detail: str = "") -> None:
+        """运营事件入冷账本（源切换/熔断/心跳等统一入口，E1/ADR-0007）。"""
+        self.ledger.append("event", {"name": name, "detail": detail})
+
+    # ── 心跳 + 每日摘要（B4/B5/ADR-0007）─────────────────────────────
+    def _maybe_heartbeat(self) -> None:
+        """外部 watchdog ping（fire-and-forget）。距上次成功超 max_silent 即补发。
+
+        5s 超时独立 urlopen，绝不阻塞主路径；失败静默（不更新 _hb_last_ok，
+        下次必然重试——不会因一次失败把心跳永久静音）。runbook：watchdog 侧
+        grace ≥ 3×bar_seconds。
+        """
+        if not self._hb_url:
+            return
+        if self._hb_last_ok and (time.monotonic() - self._hb_last_ok) < self._hb_max_silent:
+            return
+        try:
+            with urllib.request.urlopen(self._hb_url, timeout=5):
+                pass
+            self._hb_last_ok = time.monotonic()
+            self.state.heartbeat_last_ok_ts = int(time.time())
+        except Exception:  # noqa: BLE001 - ping 失败不影响交易路径
+            pass
+
+    def _maybe_daily_digest(self, cur_ts: int, equity: float, dd: float) -> None:
+        """UTC 日切 → 发昨日摘要（B4：摘要兼系统心跳）。数据不足静默跳过。"""
+        day = datetime.fromtimestamp(cur_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        prev = self._last_day
+        self._last_day = day
+        if not prev or prev == day:
+            return
+        # 从 hot state history 聚合昨日（cap 1000 内必有昨日全天）
+        day_rows = [
+            h for h in self.state.history
+            if datetime.fromtimestamp(int(h["ts"]), tz=timezone.utc).strftime("%Y-%m-%d") == prev
+        ]
+        if not day_rows:
+            return
+        first_eq = float(day_rows[0].get("equity") or 0.0)
+        last_eq = float(day_rows[-1].get("equity") or 0.0)
+        start_of_day = first_eq  # 保守：昨日首根权益为基准
+        if start_of_day <= 0:
+            return
+        day_ret = (last_eq - start_of_day) / start_of_day
+        trades_cnt = sum(
+            1 for t in self.state.trades
+            if datetime.fromtimestamp(int(t["ts"]), tz=timezone.utc).strftime("%Y-%m-%d") == prev
+        )
+        self._notify(
+            "daily_digest",
+            f"[autopilot][{self.strategy.symbol}] {prev} 日报：权益 {last_eq:.2f}，"
+            f"当日 {day_ret * 100:+.2f}%，回撤 {dd * 100:.2f}%，成交 {trades_cnt} 笔",
+        )
+        self.state.breaker_tripped = bool(self._halt_reason)
+        self.state.breaker_reason = self._halt_reason
+        try:
+            self.state.save(self.state_path)
+        except OSError as exc:  # noqa: BLE001
+            self.log(f"[autopilot] 状态保存失败: {exc}")
+
     def _halt(self, reason: str) -> None:
         if not self._halt_reason:
             self._halt_reason = reason
             self.log(f"[autopilot] HALT: {reason}")
+            self._event("halt", reason)
             self._save()
 
     def _stop_signalled(self) -> bool:

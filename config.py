@@ -224,6 +224,17 @@ class Config:
         os.getenv("AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT", "-0.10")
     )   # 从峰值权益起算回撤 ≤ 该值 → 全平+停；env 可覆盖（服务器设 -2.0 = 永不可达 = off）
     AUTOPILOT_BREAKER_MAX_BARS_STALE   = 3       # 连续 N 次 行情/持仓 拉取失败 → 停
+    # 冷账本目录（E1/ADR-0007：append-only JSONL，审计视图读它；空=项目根，与 state 同目录）
+    AUTOPILOT_LEDGER_DIR = os.getenv("AUTOPILOT_LEDGER_DIR", "")
+    # 备用源链（B2/ADR-0007）：行情断连的替补序列，逗号分隔 kind；摘除某家直接从 env 里删
+    AUTOPILOT_FALLBACK_CHAIN = os.getenv("AUTOPILOT_FALLBACK_CHAIN", "okx,bybit,binance")
+    # 每源连续失败多少次切下一家
+    AUTOPILOT_FALLBACK_MAX_FAILS = int(os.getenv("AUTOPILOT_FALLBACK_MAX_FAILS", "3"))
+    # 外部 watchdog 心跳（B5/ADR-0007）：healthchecks.io 类 ping URL；空=禁用。
+    # runbook：watchdog 侧 grace ≥ 3×bar_seconds（1h 档 ≥3h）
+    AUTOPILOT_HEARTBEAT_URL = os.getenv("AUTOPILOT_HEARTBEAT_URL", "")
+    # 距上次成功 ping 超过该秒数即补发（防低频周期/休市饿死 watchdog）
+    AUTOPILOT_HEARTBEAT_MAX_SILENT_S = int(os.getenv("AUTOPILOT_HEARTBEAT_MAX_SILENT_S", "900"))
 
     # ── 文件路径 ──────────────────────────────────────────
     STRATEGY_FILE  = "best_mt5_strategy.json"

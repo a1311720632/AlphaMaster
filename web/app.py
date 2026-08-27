@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import traceback
@@ -117,6 +118,13 @@ class StartAutopilotRequest(BaseModel):
     timeframe: str | None = None
 
 
+class AutopilotPreflightRequest(BaseModel):
+    strategy_file: str
+    mode: str  # testnet | live（paper 无需预检）
+    symbol: str | None = None
+    timeframe: str | None = None
+
+
 class AddWatchRequest(BaseModel):
     source: str
     symbol: str
@@ -129,7 +137,8 @@ class RemoveWatchRequest(BaseModel):
 
 
 class FeishuSettingsRequest(BaseModel):
-    enabled: bool | None = None
+    enabled: bool | None = None               # 实时分析转折提醒开关（feishu_enabled）
+    autopilot_enabled: bool | None = None     # 自动驾驶告警开关（feishu_autopilot_enabled）
     webhook_url: str | None = None
     secret: str | None = None
 
@@ -137,6 +146,7 @@ class FeishuSettingsRequest(BaseModel):
 class FeishuTestRequest(BaseModel):
     webhook_url: str | None = None
     secret: str | None = None
+    source: str | None = None  # "autopilot" → 推送文案换成自动驾驶语境
 
 
 class StrategyFileRequest(BaseModel):
@@ -1195,6 +1205,7 @@ def api_realtime_feishu_get() -> dict[str, Any]:
     s = load_settings()
     return {
         "enabled": bool(s.get("feishu_enabled")),
+        "autopilot_enabled": bool(s.get("feishu_autopilot_enabled", True)),
         "webhook_url": s.get("feishu_webhook_url") or "",
         "secret": s.get("feishu_secret") or "",
     }
@@ -1205,6 +1216,8 @@ def api_realtime_feishu_put(req: FeishuSettingsRequest) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     if req.enabled is not None:
         payload["feishu_enabled"] = bool(req.enabled)
+    if req.autopilot_enabled is not None:
+        payload["feishu_autopilot_enabled"] = bool(req.autopilot_enabled)
     if req.webhook_url is not None:
         payload["feishu_webhook_url"] = req.webhook_url
     if req.secret is not None:
@@ -1213,6 +1226,7 @@ def api_realtime_feishu_put(req: FeishuSettingsRequest) -> dict[str, Any]:
     return {
         "ok": True,
         "enabled": bool(saved.get("feishu_enabled")),
+        "autopilot_enabled": bool(saved.get("feishu_autopilot_enabled", True)),
         "webhook_url": saved.get("feishu_webhook_url") or "",
         "secret": saved.get("feishu_secret") or "",
     }
@@ -1230,11 +1244,12 @@ def api_realtime_feishu_test(req: FeishuTestRequest) -> dict[str, Any]:
     secret = req.secret
     if secret is None:
         secret = load_settings().get("feishu_secret") or ""
-    ok, msg = send_text(
-        "✅ AlphaMaster 飞书通知测试：配置正常。信号方向转折时会推送提醒。",
-        webhook_url=url,
-        secret=secret or "",
+    text = (
+        "✅ AlphaMaster 飞书通知测试：配置正常。熔断/源切换/日报等自动驾驶告警会推送到本群。"
+        if (req.source or "").strip() == "autopilot"
+        else "✅ AlphaMaster 飞书通知测试：配置正常。信号方向转折时会推送提醒。"
     )
+    ok, msg = send_text(text, webhook_url=url, secret=secret or "")
     if not ok:
         raise HTTPException(400, msg)
     return {"ok": True, "message": msg}
@@ -1278,6 +1293,15 @@ def _autopilot_state_dict() -> dict[str, Any]:
         out = st.to_dict()
         lb = st.history[-1] if st.history else None
         out["last_bar"] = lb
+        # 健康面板数据（C3/ADR-0007）：心跳时刻 + 最近运营事件（读冷账本 event 行）
+        out["heartbeat_last_ok_ts"] = int(st.heartbeat_last_ok_ts or 0)
+        try:
+            from autopilot.ledger import Ledger, ledger_path
+
+            lg = Ledger(ledger_path(st.symbol, st.mode, Config.AUTOPILOT_LEDGER_DIR or None))
+            out["events_recent"] = list(reversed(lg.tail(30, types={"event"})))
+        except Exception:  # noqa: BLE001
+            out["events_recent"] = []
 
         # 实时现价层（决策 #7/#8）：web 层拉 ticker，基于 last_bar 现算浮盈/实时权益。
         # 两个基准不能混——持仓浮盈用 entry(自开仓)，实时权益增量用 close(自上根收盘)。
@@ -1317,11 +1341,138 @@ def api_autopilot_status() -> dict[str, Any]:
     return status
 
 
+def _autopilot_preflight_checks(mode: str, symbol: str | None, timeframe: str | None) -> dict[str, Any]:
+    """testnet/live 启动预检（C1/D1/ADR-0007）。单项独立 try，互不影响。
+
+    返回 {"ok", "checks": [{id,label,status,detail}], "armed"}。
+    """
+    from config import Config
+
+    checks: list[dict[str, Any]] = []
+
+    def add(cid: str, label: str, status: str, detail: str = "") -> None:
+        checks.append({"id": cid, "label": label, "status": status, "detail": detail})
+
+    # 1. ccxt 可导入
+    try:
+        import ccxt  # noqa: F401
+
+        add("ccxt_installed", "ccxt 已安装", "pass")
+    except ImportError:
+        add("ccxt_installed", "ccxt 已安装", "fail", "python -m pip install ccxt")
+
+    # 2. 凭据非空
+    missing = [
+        name for name, v in (
+            ("OKX_API_KEY", Config.OKX_API_KEY),
+            ("OKX_SECRET_KEY", Config.OKX_SECRET_KEY),
+            ("OKX_PASSPHRASE", Config.OKX_PASSPHRASE),
+        ) if not (v or "").strip()
+    ]
+    if missing:
+        add("credentials", "OKX 凭据已配置", "fail", f"缺 {', '.join(missing)}（.env）")
+    else:
+        add("credentials", "OKX 凭据已配置", "pass")
+
+    # 3. 凭据有效（实测 fetch_balance；同时验证 sandbox 指向——配错会 401/1100xx）
+    if not missing:
+        try:
+            from autopilot.backends import OKXBackend
+
+            be = OKXBackend(
+                symbol=symbol or "BTCUSDT", sandbox=(mode == "testnet"),
+                api_key=Config.OKX_API_KEY, secret=Config.OKX_SECRET_KEY,
+                passphrase=Config.OKX_PASSPHRASE,
+            )
+            try:
+                eq = be.fetch_equity()
+                if eq > 0:
+                    target = "模拟盘(demo)" if mode == "testnet" else "真实账户"
+                    add("credentials_ok", f"凭据有效 · {target} 权益 {eq:.2f} USDT", "pass")
+                else:
+                    add("credentials_ok", "凭据有效", "fail", f"权益异常: {eq}")
+            finally:
+                be.close()
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            hint = "检查 key 与 sandbox 指向（testnet 需 demo 专用 key）" if (
+                "401" in msg or "1100" in msg or "AuthenticationError" in msg
+            ) else msg
+            add("credentials_ok", "凭据有效", "fail", hint[:200])
+    else:
+        add("credentials_ok", "凭据有效", "fail", "凭据缺失，跳过实测")
+
+    # 4. state 三元组匹配（不匹配 → warn：启动时自动归档新建，C2）
+    try:
+        from config import Config as _C
+
+        from autopilot.state import AutopilotState
+
+        st = AutopilotState.load(_C.AUTOPILOT_STATE_FILE)
+        if st is None:
+            add("state_match", "state 三元组匹配", "pass", "无历史账本，将新建")
+        elif (st.symbol, st.timeframe, st.mode) != (
+            symbol or st.symbol, timeframe or st.timeframe, mode
+        ):
+            add(
+                "state_match", "state 三元组匹配", "warn",
+                f"检测到 {st.symbol}/{st.timeframe}/{st.mode} 的旧账本，启动时将归档后新建",
+            )
+        else:
+            add("state_match", "state 三元组匹配", "pass")
+    except Exception as exc:  # noqa: BLE001
+        add("state_match", "state 三元组匹配", "warn", f"读取失败: {exc}")
+
+    # 5. testnet 达标清单（仅 live；D1：2-4 周长跑机检）
+    if mode == "live":
+        try:
+            from autopilot.ledger import ledger_path
+            from autopilot.readiness import live_readiness, summarize_testnet_run
+
+            sym = symbol or "BTCUSDT"
+            lg = ledger_path(sym, "testnet", Config.AUTOPILOT_LEDGER_DIR or None)
+            summary = summarize_testnet_run(lg)
+            ready, sub = live_readiness(summary)
+            add(
+                "testnet_ready",
+                "testnet 长跑达标（live 门槛）",
+                "pass" if ready else "fail",
+                "; ".join(f"{c['label']}: {c['detail']}" for c in sub if c["status"] != "pass"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            add("testnet_ready", "testnet 长跑达标（live 门槛）", "fail", str(exc)[:200])
+    else:
+        add("testnet_ready", "testnet 长跑达标（live 门槛）", "pass", "testnet 模式免检")
+
+    # armed 预留（硬门槛 env 开关位，金额变大时启用）
+    armed = bool(os.getenv("AUTOPILOT_LIVE_ARMED", "1").strip().lower() not in ("0", "false"))
+    if mode == "live" and not armed:
+        add("armed", "live 硬门槛（AUTOPILOT_LIVE_ARMED）", "fail", "未武装")
+
+    ok = all(c["status"] != "fail" for c in checks)
+    return {"ok": ok, "checks": checks, "armed": armed}
+
+
+@app.post("/api/autopilot/preflight")
+def api_autopilot_preflight(req: AutopilotPreflightRequest) -> dict[str, Any]:
+    if req.mode not in ("testnet", "live"):
+        raise HTTPException(400, "preflight 仅用于 testnet/live（paper 免检）")
+    return _autopilot_preflight_checks(req.mode, req.symbol, req.timeframe)
+
+
 @app.post("/api/autopilot/start")
 def api_autopilot_start(req: StartAutopilotRequest) -> dict[str, Any]:
     sf = resolve_strategy_file(req.strategy_file) if req.strategy_file else ""
     if not sf:
         raise HTTPException(400, "缺少 strategy_file")
+    # testnet/live 快检（C1/ADR-0007）：ccxt + 凭据两项，防 TOCTOU；完整清单走 preflight
+    if req.mode in ("testnet", "live"):
+        pre = _autopilot_preflight_checks(req.mode, req.symbol, req.timeframe)
+        if not pre["ok"]:
+            fails = "; ".join(
+                f"{c['label']}: {c['detail']}" for c in pre["checks"] if c["status"] == "fail"
+            )
+            raise HTTPException(409, f"预检未过: {fails}")
     save_settings({"autopilot_mode": req.mode, "autopilot_last_strategy": sf,
                    "autopilot_symbol": req.symbol or "", "autopilot_timeframe": req.timeframe or "",
                    "autopilot_intended_running": True})
@@ -1335,6 +1486,26 @@ def api_autopilot_start(req: StartAutopilotRequest) -> dict[str, Any]:
     except (RuntimeError, ValueError) as e:
         raise HTTPException(409, str(e)) from e
     return {"ok": True, "job": job.to_dict()}
+
+
+@app.get("/api/autopilot/history")
+def api_autopilot_history(type: str = "all", limit: int = 2000) -> dict[str, Any]:
+    """冷账本读侧（E1/ADR-0007）：审计视图（日历/曲线/成交/事件时间线）的数据源。
+
+    symbol/mode 取自当前 hot state 三元组 → ledger 路径；无 state → 空。
+    """
+    from config import Config
+
+    from autopilot.ledger import Ledger, ledger_path
+    from autopilot.state import AutopilotState
+
+    st = AutopilotState.load(Config.AUTOPILOT_STATE_FILE)
+    if not st:
+        return {"rows": []}
+    limit = max(1, min(int(limit), 10000))
+    types = {type} if type in ("bar", "trade", "event") else None
+    lg = Ledger(ledger_path(st.symbol, st.mode, Config.AUTOPILOT_LEDGER_DIR or None))
+    return {"rows": lg.tail(limit, types=types)}
 
 
 @app.post("/api/autopilot/stop")

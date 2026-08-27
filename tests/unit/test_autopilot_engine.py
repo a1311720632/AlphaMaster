@@ -11,7 +11,7 @@ import pytest
 
 from web.data_sources.base import Bar, DataSource, DataSourceError
 
-from autopilot.backends import ExecutionBackend, OrderResult
+from autopilot.backends import ExecutionBackend, OrderResult, SimBackend
 from autopilot.engine import AutopilotEngine
 from autopilot.strategy_loader import StrategySpec
 
@@ -126,6 +126,7 @@ def _make_engine(tmp_path: Path, source, backend, **kw) -> AutopilotEngine:
         stop_signal_paths=[tmp_path / "AUTOPILOT_STOP_SIGNAL", tmp_path / "STOP_SIGNAL"],
         cadence_s=0,
         max_bars=kw.get("max_bars"),
+        sleep_fn=kw.get("sleep_fn"),
         log=lambda m: None,
     )
 
@@ -285,6 +286,130 @@ def test_engine_restore_equity_no_reset(tmp_path):
     # 第一次确实产生了盈亏（equity 偏离 start_equity）→ 恢复后不得断层回 10000
     if abs(last_eq - 10000.0) > 1e-9:
         assert be2._equity != pytest.approx(10000.0)
+
+
+def test_engine_resume_keeps_drawdown_baseline(tmp_path):
+    """B1：回撤基线跨重启——恢复 state 时回填 peak，重启不重置回撤额度。
+
+    场景：peak=12000、当前权益 10800（dd=-10%）→ 重启 → DrawdownBreaker 应回填
+    12000，首根 tick 权益 10800 仍触发熔断（现状：peak 从 -inf 起算 → 10800 成新峰 → 不触发）。
+    """
+    from autopilot.backends import SimBackend
+    from autopilot.state import AutopilotState, BarRecord
+
+    # 预置一份 peak=12000 / 末根 equity=10800 的 state
+    st = AutopilotState(symbol="TEST", timeframe="1h", mode="paper",
+                        peak_equity=12000.0, last_ts=1_700_000_000 + 299 * 3600)
+    st.record(BarRecord(ts=1_700_000_000 + 299 * 3600, close=100.0, target_pos=0.0,
+                        target_notional=0.0, actual_notional=0.0, equity=10800.0,
+                        peak_equity=12000.0, drawdown_pct=-0.10))
+    state_file = tmp_path / "autopilot_state.json"
+    st.save(state_file)
+
+    # 恒定权益 10800 的 backend（峰 12000 → dd=-10% ≤ -0.10 触发；若 peak 丢失则 dd=0）
+    class FlatBackend(SimBackend):
+        def fetch_equity(self):
+            return 10800.0
+
+    be = FlatBackend(start_equity=10800.0, cost_rate=0.0)
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=5)
+    reason = eng.run_forever()
+    assert "回撤" in reason
+    assert eng.state.breaker_tripped
+
+
+def test_engine_archives_state_on_mode_mismatch(tmp_path):
+    """C2：三元组不匹配 → 旧 state 归档 .bak_{mode}_{date}，新 state 空白起算。"""
+    from autopilot.backends import SimBackend
+
+    be1 = SimBackend(start_equity=1.0, cost_rate=0.0003)
+    eng1 = _make_engine(tmp_path, FakeSource(_pool()), be1, max_bars=2)
+    eng1.run_forever()
+    state_file = tmp_path / "autopilot_state.json"
+    assert state_file.exists()
+
+    # 换 mode（paper → 模拟 testnet 语义：mode 由 backend 决定）重启 → 归档
+    class TestnetBackend(SimBackend):
+        mode = "testnet"
+
+    be2 = TestnetBackend(start_equity=5000.0, cost_rate=0.0003)
+    eng2 = _make_engine(tmp_path, FakeSource(_pool()), be2, max_bars=2)
+    baks = list(tmp_path.glob("autopilot_state.bak_paper_*"))
+    assert len(baks) == 1, f"应恰好归档一份 paper state: {baks}"
+    # 新 state 三元组已是 testnet 且 history 重新起算（max_bars=2 内含熔断前记录≥1）
+    assert eng2.state.mode == "testnet"
+    assert eng2.state.start_equity <= 0  # 尚未 lazy 设定基线（新账本空白）
+
+
+def test_engine_no_archive_when_matching(tmp_path):
+    """C2：三元组匹配（同 symbol/tf/mode）→ 不归档、正常恢复。"""
+    from autopilot.backends import SimBackend
+
+    be1 = SimBackend(start_equity=1.0, cost_rate=0.0003)
+    eng1 = _make_engine(tmp_path, FakeSource(_pool()), be1, max_bars=2)
+    eng1.run_forever()
+    n_hist = len(eng1.state.history)
+
+    be2 = SimBackend(start_equity=1.0, cost_rate=0.0003)
+    eng2 = _make_engine(tmp_path, FakeSource(_pool()), be2, max_bars=3)
+    assert not list(tmp_path.glob("autopilot_state.bak_*")), "匹配时不应产生归档"
+    assert len(eng2.state.history) >= n_hist  # 同一账本延续
+
+
+class FailingOrderBackend(ExecutionBackend):
+    """place_delta_order 恒失败（执行熔断测试替身）。"""
+
+    mode = "paper"
+
+    def __init__(self, msg: str = "simulated reject"):
+        self.order_calls = 0
+        self._msg = msg
+
+    def fetch_equity(self):
+        return 10000.0
+
+    def fetch_position_notional(self, symbol):
+        return 0.0
+
+    def place_delta_order(self, symbol, delta_notional):
+        self.order_calls += 1
+        return OrderResult(ok=False, filled_notional=0.0, message=self._msg)
+
+    def flatten_all(self, symbol):
+        return OrderResult(ok=True, message="flattened")
+
+
+def test_engine_execution_breaker_halts(tmp_path):
+    """B3：下单 3 连败 → 执行熔断 halt（不靠下根 bar 自愈），reason 前缀钉死。
+
+    sleep_fn 注入 no-op 免真等 2s；熔断时 state 落盘、halt 前留最后一根账。
+    """
+    be = FailingOrderBackend()
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=5, sleep_fn=lambda s: None)
+    reason = eng.run_forever()
+    assert reason.startswith("执行熔断")
+    assert "simulated reject" in reason
+    assert be.order_calls == 3  # 恰好 3 连重试（bar 内），halt 后不再有下一根 bar 的第 4 次
+    assert eng.state.breaker_tripped
+    assert len(eng.state.history) >= 1  # halt 前留了最后一根账
+
+
+def test_engine_order_retry_succeeds_no_halt(tmp_path):
+    """B3：第 2 次重试成功 → 不熔断，正常调仓继续跑。"""
+
+    class FlakyOrderBackend(FailingOrderBackend):
+        def place_delta_order(self, symbol, delta_notional):
+            self.order_calls += 1
+            if self.order_calls == 1:
+                return OrderResult(ok=False, filled_notional=0.0, message="transient")
+            return OrderResult(ok=True, filled_notional=delta_notional, price=100.0,
+                               message="recovered")
+
+    be = FlakyOrderBackend()
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=3, sleep_fn=lambda s: None)
+    reason = eng.run_forever()
+    assert reason.startswith("max_bars")  # 未熔断，正常跑完
+    assert be.order_calls >= 2
 
 
 def test_classify_action():

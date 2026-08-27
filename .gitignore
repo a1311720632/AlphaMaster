@@ -85,6 +85,8 @@ training_time_*.json
 STOP_SIGNAL
 AUTOPILOT_STOP_SIGNAL
 autopilot_state.json
+autopilot_state.json.bak_*
+autopilot_ledger_*.jsonl
 train.pid
 train_stdout.log
 train_stderr.log
@@ -117,3 +119,4 @@ secrets/
 *.key
 credentials*.json
 local_settings*.json
+.playwright-mcp/

@@ -40,6 +40,7 @@ class AutopilotState:
     history: list[dict[str, Any]] = field(default_factory=list)
     start_equity: float = 0.0      # 总收益基线：paper=起点权益，live=首次余额快照
     trades: list[dict[str, Any]] = field(default_factory=list)  # 成交(fill)流水
+    heartbeat_last_ok_ts: int = 0  # 外部 watchdog ping 最近成功时刻（B5；0=从未）
 
     def record(self, rec: BarRecord) -> None:
         self.history.append(asdict(rec))
@@ -71,6 +72,7 @@ class AutopilotState:
             history=list(d.get("history", [])),
             start_equity=float(d.get("start_equity", 0.0)),
             trades=list(d.get("trades", [])),
+            heartbeat_last_ok_ts=int(d.get("heartbeat_last_ok_ts", 0)),
         )
 
     def save(self, path: str | Path) -> None:
@@ -87,3 +89,40 @@ class AutopilotState:
             return cls.from_dict(json.loads(p.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
             return None
+
+
+def archive_if_mismatch(
+    state_path: str | Path, symbol: str, timeframe: str, mode: str
+) -> str | None:
+    """三元组 (symbol, timeframe, mode) 任一不匹配 → 旧 state 归档（C2/ADR-0007）。
+
+    state 的归属是"一笔钱的一段旅程"：换模式/换品种/换周期 = 换了一笔钱，旧账本
+    归档为 {stem}.bak_{old_mode}_{YYYYMMDD}（重名追加 _2/_3…），调用方随后新建空白
+    state。匹配（或文件本就不存在/已损坏）返回 None，不产生任何文件。
+    归档不删除——审计保留；"一键清除"（reset）语义仍是删 hot state。
+    """
+    p = Path(state_path)
+    if not p.exists():
+        return None
+    loaded = AutopilotState.load(p)
+    if loaded is None:
+        return None  # 坏 JSON：engine 的 load 也返回 None → 新建覆盖，无需归档
+    if (
+        loaded.symbol == symbol
+        and loaded.timeframe == timeframe
+        and loaded.mode == mode
+    ):
+        return None
+    from datetime import datetime, timezone
+
+    date = datetime.now(timezone.utc).strftime("%Y%m%d")
+    bak = p.with_name(f"{p.stem}.bak_{loaded.mode}_{date}")
+    n = 2
+    while bak.exists():  # 同日多次切换：追加序号防覆盖
+        bak = p.with_name(f"{p.stem}.bak_{loaded.mode}_{date}_{n}")
+        n += 1
+    try:
+        p.rename(bak)
+    except OSError:
+        return None  # 归档失败（文件被占等）：宁可新建覆盖也不阻断启动
+    return str(bak)

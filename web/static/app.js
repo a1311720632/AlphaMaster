@@ -2895,6 +2895,26 @@ function initAutopilotOnce() {
   $("apStopBtn").addEventListener("click", stopAutopilot);
   const apResetBtn = $("apResetBtn");
   if (apResetBtn) apResetBtn.addEventListener("click", resetAutopilot);
+  // live 确认 modal（C1）：backdrop/取消关闭、输入品种名解锁、回车确认
+  document.querySelectorAll("[data-close-ap-live]").forEach((el) =>
+    el.addEventListener("click", closeApLiveConfirm));
+  const apLiveInput = $("apLiveConfirmInput");
+  if (apLiveInput) {
+    apLiveInput.addEventListener("input", updateApLiveConfirmBtn);
+    apLiveInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !$("apLiveConfirmBtn").disabled) confirmApLiveStart();
+    });
+  }
+  const apLiveBtn = $("apLiveConfirmBtn");
+  if (apLiveBtn) apLiveBtn.addEventListener("click", confirmApLiveStart);
+  // 飞书通知配置（自动驾驶页）
+  const apFeishuSave = $("apFeishuSaveBtn");
+  if (apFeishuSave) apFeishuSave.addEventListener("click", saveApFeishuSettings);
+  const apFeishuTest = $("apFeishuTestBtn");
+  if (apFeishuTest) apFeishuTest.addEventListener("click", testApFeishu);
+  const apFeishuCb = $("apFeishuEnabled");
+  if (apFeishuCb) apFeishuCb.addEventListener("change", updateApFeishuStatusHint);
+  loadApFeishuSettings();
   // 从已保存设置恢复模式/品种/周期
   fetchJSON("/api/settings", { silent: true })
     .then(async (s) => {
@@ -2998,29 +3018,115 @@ function updateApStartBtn() {
 
 async function startAutopilot() {
   if (!apStrategyFile) {
-    toastErr("请先选择策略文件");
+    showErrorPopup("未选择策略", "请先选择策略文件（第一步挖出的 best_*.json）");
     return;
   }
-  const body = {
-    strategy_file: apStrategyFile,
-    mode: $("apMode").value,
-    symbol: $("apSymbol").value.trim() || null,
-    timeframe: $("apTimeframe").value.trim() || null,
-  };
+  const mode = $("apMode").value;
+  const symbol = $("apSymbol").value.trim() || null;
+  const timeframe = $("apTimeframe").value.trim() || null;
+  if (mode !== "paper") {
+    // C1/ADR-0007：testnet/live 先过 preflight，再弹确认 modal（输入品种名解锁）
+    await openApLiveConfirm(mode, symbol, timeframe);
+    return;
+  }
+  await doStartAutopilot(mode, symbol, timeframe);
+}
+
+async function doStartAutopilot(mode, symbol, timeframe) {
+  const body = { strategy_file: apStrategyFile, mode, symbol, timeframe };
   try {
     await fetchJSON("/api/autopilot/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    await refreshAutopilot();
+    closeApLiveConfirm();
+    apHistoryCache = null;  // 新一轮：冷账本缓存失效
+    await refreshAutopilot(true);
   } catch (e) {
     showErrorPopup("启动失败", e.message);
   }
 }
 
-async function stopAutopilot() {
+// ========= live/testnet 确认 modal（C1/ADR-0007：preflight 清单 + 输入品种名解锁）=========
+let apLivePending = null;   // {mode, symbol, timeframe} 待确认的启动参数
+
+function closeApLiveConfirm() {
+  const modal = $("apLiveConfirmModal");
+  if (modal) modal.hidden = true;
+  apLivePending = null;
+}
+
+async function openApLiveConfirm(mode, symbol, timeframe) {
+  let pre;
   try {
+    pre = await fetchJSON("/api/autopilot/preflight", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strategy_file: apStrategyFile, mode, symbol, timeframe }),
+    });
+  } catch (e) {
+    showErrorPopup("预检失败", e.message);
+    return;
+  }
+  // fail 项存在 → 不给确认机会，直接展示清单
+  const hasFail = (pre.checks || []).some((c) => c.status === "fail");
+  const listEl = $("apPreflightList");
+  if (listEl) {
+    const icon = { pass: "✅", fail: "❌", warn: "⚠️" };
+    const items = (pre.checks || []).map((c) =>
+      `<li style="padding:3px 0;">${icon[c.status] || "·"} ${escHtml(c.label)}` +
+      (c.detail ? ` <span style="opacity:.65;font-size:12px;">${escHtml(c.detail)}</span>` : "") +
+      `</li>`
+    );
+    if (hasFail) {
+      items.unshift(`<li style="padding:3px 0;color:#f87171;font-weight:600;">预检未过，无法启动——先解决下方红叉项</li>`);
+    }
+    listEl.innerHTML = items.join("");
+  }
+  const metaEl = $("apLiveConfirmMeta");
+  if (metaEl) {
+    metaEl.innerHTML =
+      `模式 <b>${mode === "live" ? "live · 真实资金" : "testnet · OKX 模拟盘"}</b> · ` +
+      `品种 <b>${escHtml(symbol || "(策略内)")}</b> · 周期 <b>${escHtml(timeframe || "(策略内)")}</b>`;
+  }
+  const hintEl = $("apLiveConfirmSymbolHint");
+  if (hintEl) hintEl.textContent = symbol || apStrategyFile.replace(/^.*best_/, "").replace(/\.json$/, "");
+  const inputEl = $("apLiveConfirmInput");
+  if (inputEl) inputEl.value = "";
+  if (hasFail) {
+    const btn = $("apLiveConfirmBtn");
+    if (btn) btn.disabled = true;
+    const modal = $("apLiveConfirmModal");
+    if (modal) modal.hidden = false;
+    apLivePending = null;  // fail：只展示不给确认
+    return;
+  }
+  apLivePending = { mode, symbol, timeframe };
+  updateApLiveConfirmBtn();
+  const modal = $("apLiveConfirmModal");
+  if (modal) modal.hidden = false;
+  if (inputEl) inputEl.focus();
+}
+
+function updateApLiveConfirmBtn() {
+  const btn = $("apLiveConfirmBtn");
+  const inputEl = $("apLiveConfirmInput");
+  if (!btn || !inputEl) return;
+  const want = apLivePending && apLivePending.symbol
+    ? apLivePending.symbol.toUpperCase()
+    : ($("apLiveConfirmSymbolHint") || {}).textContent || "";
+  btn.disabled = inputEl.value.trim().toUpperCase() !== want.toUpperCase();
+}
+
+async function confirmApLiveStart() {
+  if (!apLivePending) return closeApLiveConfirm();
+  const { mode, symbol, timeframe } = apLivePending;
+  apLivePending = null;
+  await doStartAutopilot(mode, symbol, timeframe);
+}
+
+async function stopAutopilot() {  try {
     await fetchJSON("/api/autopilot/stop", { method: "POST" });
     await refreshAutopilot();
   } catch (e) {
@@ -3029,14 +3135,15 @@ async function stopAutopilot() {
 }
 
 async function resetAutopilot() {
-  if (!confirm("一键清除：停止自动驾驶并清空所有历史记录（持仓/成交/权益曲线），权益回到初始状态。确定？")) return;
+  if (!confirm("一键清除：停止自动驾驶并删除热账本（持仓/成交/权益曲线回到初始）。冷账本（审计流水）与归档保留。确定？")) return;
   try {
     await fetchJSON("/api/autopilot/reset", { method: "POST" });
     apPositionSig = "";  // 清前端签名缓存，强制重渲染为空
     apFillsSig = "";
     apDailySig = "";  // 每日盈亏：清签名 + 销毁图，避免 reset 后留陈旧画面
     if (apDailyChart) { apDailyChart.destroy(); apDailyChart = null; }
-    await refreshAutopilot();
+    apHistoryCache = null;
+    await refreshAutopilot(true);
   } catch (e) {
     showErrorPopup("清除失败", e.message);
   }
@@ -3240,6 +3347,32 @@ function renderApDailyCurve(days) {
   apDailySig = structSig;
 }
 
+// ========= 冷账本读侧（E1/ADR-0007）：审计视图数据源，30s 缓存不打 4s 轮询 =========
+let apHistoryCache = null;      // {at, lastBarTs, rows}
+const AP_HISTORY_TTL_MS = 30000;
+
+async function fetchApHistory(force = false) {
+  const now = Date.now();
+  // 缓存命中：未过期且 last_bar 未变（新 bar 才可能产生新账本行）
+  let lastBarTs = 0;
+  try {
+    const st = await fetchJSON("/api/autopilot/status", { silent: true });
+    lastBarTs = Number(st?.state?.last_bar?.ts) || 0;
+  } catch (_) { /* status 拉不到就用缓存 */ }
+  if (!force && apHistoryCache
+      && now - apHistoryCache.at < AP_HISTORY_TTL_MS
+      && apHistoryCache.lastBarTs === lastBarTs) {
+    return apHistoryCache.rows;
+  }
+  let rows = [];
+  try {
+    const data = await fetchJSON("/api/autopilot/history?limit=4000", { silent: true });
+    rows = (data && data.rows) || [];
+  } catch (_) { /* ledger 读失败 → 回落 hot state */ }
+  apHistoryCache = { at: now, lastBarTs, rows };
+  return rows;
+}
+
 async function refreshAutopilot() {
   let st;
   try {
@@ -3272,10 +3405,158 @@ async function refreshAutopilot() {
   if (logView) logView.textContent = (st.log_tail || []).join("\n") || "等待任务…";
 
   renderApPosition(st.state);
-  renderApFills(st.state?.trades);
-  const apDays = apAggregateDaily(st.state?.history);
+  renderApHealth(st);
+
+  // 审计视图读冷账本（E1）：日历/曲线/成交不再受 hot state 1000 根 cap 限制；
+  // ledger 读失败时回落 hot state（fetchApHistory 内 catch 返回缓存/空 → 用 state 兜底）
+  const hist = await fetchApHistory();
+  const bars = hist.filter((r) => r && r.type === "bar");
+  const trades = hist.filter((r) => r && r.type === "trade");
+  const dailySrc = bars.length ? bars : (st.state?.history || []);
+  const fillsSrc = trades.length ? trades : (st.state?.trades || []);
+  renderApFills(fillsSrc);
+  const apDays = apAggregateDaily(dailySrc);
   renderApCalendar(apDays);
   renderApDailyCurve(apDays);
+}
+
+// ========= 系统健康面板（C3/ADR-0007）=========
+let apHealthSig = "";
+
+const AP_EVENT_LABEL = {
+  source_switch: "源切换",
+  breaker_drawdown: "回撤熔断",
+  breaker_execution: "执行熔断",
+  breaker_connectivity: "断连熔断",
+  alert_critical: "关键告警",
+  halt: "停机",
+};
+
+function renderApHealth(st) {
+  const job = st?.job;
+  const state = st?.state || {};
+  const engine = job?.state === "running"
+    ? `运行中 · ${job.mode || ""}`
+    : (job?.state ? String(job.state) : "未启动");
+  const halted = !!state.breaker_tripped;
+  const halt = halted ? (state.breaker_reason || "已触发") : "—";
+  const hbTs = Number(state.heartbeat_last_ok_ts) || 0;
+  const hb = hbTs > 0
+    ? `${new Date(hbTs * 1000).toLocaleTimeString()}（${Math.floor((Date.now() / 1000 - hbTs) / 60)} 分钟前）`
+    : "未配置/未上报";
+  const events = state.events_recent || [];
+  const sig = [engine, halt, hbTs, events.length,
+    events[0] ? `${events[0].ts}|${events[0].name}` : ""].join("|");
+  if (sig === apHealthSig) return;
+  apHealthSig = sig;
+
+  // 启动面板头的引擎徽标：不滚屏即可见引擎状态与熔断告急
+  const badge = $("apEngineBadge");
+  if (badge) {
+    const running = job?.state === "running";
+    badge.textContent = halted ? "● 已熔断" : running ? "● 运行中" : `● ${engine}`;
+    badge.style.color = halted ? "#f87171" : running ? "#4ade80" : "#7d8aa3";
+    badge.title = halted && state.breaker_reason ? String(state.breaker_reason).slice(0, 200) : engine;
+  }
+
+  const setB = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
+  setB("apHealthEngine", engine);
+  const haltEl = $("apHealthHalt");
+  if (haltEl) {
+    haltEl.textContent = halt;
+    haltEl.style.color = halted ? "#f87171" : "";
+  }
+  setB("apHealthHb", hb);
+  const tl = $("apEventsTimeline");
+  if (tl) {
+    if (!events.length) {
+      tl.textContent = "暂无运营事件";
+    } else {
+      tl.innerHTML = events.map((e) => {
+        const t = new Date((Number(e.ts) || 0) * 1000).toLocaleString();
+        const label = AP_EVENT_LABEL[e.name] || e.name || "事件";
+        const detail = e.detail ? escHtml(String(e.detail).slice(0, 160)) : "";
+        return `<div><span style="opacity:.55;">${t}</span> <b style="color:#9aa6bd;">[${escHtml(label)}]</b> ${detail}</div>`;
+      }).join("");
+    }
+  }
+}
+
+// ========= 飞书通知配置（自动驾驶页；webhook 与实时分析页共用存储，开关独立）=========
+async function loadApFeishuSettings() {
+  try {
+    const s = await fetchJSON("/api/realtime/feishu", { silent: true });
+    const cb = $("apFeishuEnabled");
+    if (cb) cb.checked = s.autopilot_enabled !== false;   // 缺省视为开（安全告警）
+    const wh = $("apFeishuWebhook");
+    if (wh && document.activeElement !== wh) wh.value = s.webhook_url || "";
+    const sec = $("apFeishuSecret");
+    if (sec && document.activeElement !== sec) sec.value = s.secret || "";
+    updateApFeishuStatusHint(s);
+  } catch (_) { /* 拉取失败不打扰 */ }
+}
+
+function updateApFeishuStatusHint(s) {
+  const hint = $("apFeishuStatusHint");
+  if (!hint) return;
+  const url = (s && (s.webhook_url != null ? s.webhook_url : $("apFeishuWebhook")?.value.trim())) || "";
+  const enabled = s ? s.autopilot_enabled !== false : ($("apFeishuEnabled")?.checked ?? true);
+  if (!url) {
+    hint.textContent = "未配置 Webhook · 告警仅入冷账本";
+    hint.style.color = "#f59e0b";
+  } else if (!enabled) {
+    hint.textContent = "已配置 · 推送已关闭";
+    hint.style.color = "#7d8aa3";
+  } else {
+    hint.textContent = "已配置 · 熔断/切换/日报将推送到飞书群 ✓";
+    hint.style.color = "#4ade80";
+  }
+}
+
+async function saveApFeishuSettings() {
+  const body = {
+    autopilot_enabled: !!$("apFeishuEnabled")?.checked,
+    webhook_url: ($("apFeishuWebhook")?.value || "").trim(),
+    secret: ($("apFeishuSecret")?.value || "").trim(),
+  };
+  // secret 输入框为空时视作"不修改"——避免误清已存密钥（掩码显示留空的常见坑）
+  if (!body.secret) delete body.secret;
+  try {
+    const saved = await fetchJSON("/api/realtime/feishu", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    updateApFeishuStatusHint(saved);
+    const btn = $("apFeishuSaveBtn");
+    if (btn) {
+      btn.textContent = "已保存 ✓";
+      setTimeout(() => { btn.textContent = "保存"; }, 1600);
+    }
+  } catch (e) {
+    showErrorPopup("飞书配置保存失败", e.message);
+  }
+}
+
+async function testApFeishu() {
+  try {
+    await fetchJSON("/api/realtime/feishu/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        webhook_url: ($("apFeishuWebhook")?.value || "").trim(),
+        secret: ($("apFeishuSecret")?.value || "").trim(),
+        source: "autopilot",
+      }),
+    });
+    const hint = $("apFeishuStatusHint");
+    if (hint) {
+      hint.textContent = "测试消息已发出 ✓ 到群里确认";
+      hint.style.color = "#4ade80";
+    }
+  } catch (e) {
+    showErrorPopup("飞书测试失败", e.message);
+  }
 }
 
 // 签名守卫：4s 轮询时数值未变则不重建 DOM，避免闪烁/sparkline 重放（仿 btPortfolioSig）

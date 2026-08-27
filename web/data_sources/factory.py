@@ -25,6 +25,12 @@ def _build(kind: str) -> DataSource:
     if kind == "okx":
         from web.data_sources.okx_source import OKXSource
         return OKXSource()
+    if kind == "bybit":
+        from web.data_sources.bybit_source import BybitSource
+        return BybitSource()
+    if kind == "binance":
+        from web.data_sources.binance_source import BinanceSource
+        return BinanceSource()
     if kind == "tongdaxin":
         from web.data_sources.tongdaxin_source import TongdaxinSource
         return TongdaxinSource()

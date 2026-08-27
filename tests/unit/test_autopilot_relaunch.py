@@ -39,6 +39,7 @@ def _reset_manager(monkeypatch):
     (False, 0, "", "stay_down"),                      # 干净退出
     (False, 0, "max_bars 达成（2 根新 bar）", "stay_down"),
     (False, 1, "断网熔断: 连续 3 次拉取失败", "relaunch"),  # 瞬时，自愈
+    (False, 1, "执行熔断: 下单失败: 401 未授权", "stay_down"),  # 执行层坏了（ADR-0007），终点是人
     (False, 1, "", "relaunch"),                       # 未知崩溃
     (False, 137, "", "relaunch"),                     # 信号死亡（code>0 视为崩溃）
     (False, -11, "", "relaunch"),                     # SIGSEGV 等（code<0 非 user-stop）
