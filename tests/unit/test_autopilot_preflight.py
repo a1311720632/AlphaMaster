@@ -88,11 +88,18 @@ def test_gap_detected(tmp_path):
 
 
 # ── preflight（web 层）──────────────────────────────────────────────────
-def test_preflight_passes_without_credentials_when_ccxt_missing():
-    """ccxt 未装 + 凭据缺失 → ok=False 且两检查项 fail（其余项不炸）。"""
+def test_preflight_passes_without_credentials_when_ccxt_missing(monkeypatch):
+    """凭据缺失 → ok=False；ccxt 项随环境 pass/fail 都合法（其余项不炸）。
+
+    显式清空凭据——不能假设运行环境没配 .env（开发者本机可能已填真实 key）。
+    """
     import fastapi.testclient
 
     from web.app import app
+    from config import Config
+
+    for k in ("OKX_API_KEY", "OKX_SECRET_KEY", "OKX_PASSPHRASE"):
+        monkeypatch.setattr(Config, k, "")
 
     client = fastapi.testclient.TestClient(app)
     resp = client.post("/api/autopilot/preflight", json={
