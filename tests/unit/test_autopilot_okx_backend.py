@@ -279,3 +279,37 @@ def test_no_receipt_support_falls_back_to_estimate(monkeypatch):
         "BTCUSDT", 500.0)
     assert res2.ok and res2.filled_notional == pytest.approx(500.0)
     assert "estimated" in res2.message
+
+
+class PickyExchange(FakeExchange):
+    """复刻新版 ccxt 行为：params/price 显式传 None 时抛迭代错误。
+
+    regression：执行熔断实战首单即因 create_order(..., None, None) 炸
+    "'NoneType' object is not iterable" → 3 连败停机。锁定调用形状。
+    """
+
+    def create_order(self, symbol, type_, side, amount, price="UNSET", params="UNSET"):
+        if price is None and params is None:
+            raise TypeError("'NoneType' object is not iterable")
+        return super().create_order(symbol, type_, side, amount)
+
+
+def test_create_order_never_passes_none_params():
+    """delta 单与 reduceOnly 全平都不得给 ccxt 传 params=None。"""
+    # delta 单：PickyExchange 只在 (price=None, params=None) 同传时炸
+    ex = PickyExchange(last_price=100.0, contract_size=1.0, min_amount=1.0)
+    be = _backend(ex)
+    res = be.place_delta_order("BTCUSDT", 500.0)
+    assert res.ok or "未成交" in res.message  # 不应出现下单失败
+
+    # 全平：price=None + params 字典是合法形状，不炸；reduceOnly 失败回落也要能走通
+    class PickyRejectReduce(PickyExchange):
+        def create_order(self, symbol, type_, side, amount, price="UNSET", params="UNSET"):
+            if params == {"reduceOnly": True}:
+                raise RuntimeError("reduceOnly not supported")
+            return super().create_order(symbol, type_, side, amount, price, params)
+
+    ex2 = PickyRejectReduce(position_contracts=2.0, position_side="long",
+                            last_price=100.0, contract_size=1.0, min_amount=1.0)
+    res2 = _backend(ex2).flatten_all("BTCUSDT")
+    assert res2.ok and res2.message.startswith("flatten")

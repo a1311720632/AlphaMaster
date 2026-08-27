@@ -368,11 +368,18 @@ class OKXBackend(ExecutionBackend):
         与旧行为一致；持仓真值仍由 ADR-0006 对账兜底，估算只影响审计精度不影响仓位。
         """
         direction = 1.0 if side == "buy" else -1.0
-        params = {"reduceOnly": True} if reduce_only else None
+        # 注意：不可给 ccxt 传 params=None——部分版本会迭代 params 报
+        # "'NoneType' object is not iterable"。无附加参数时走默认参调用。
         try:
-            res = self._ex.create_order(  # type: ignore[union-attr]
-                self._ccxt_symbol, "market", side, abs(contracts), None, params
-            )
+            if reduce_only:
+                res = self._ex.create_order(  # type: ignore[union-attr]
+                    self._ccxt_symbol, "market", side, abs(contracts),
+                    None, {"reduceOnly": True},
+                )
+            else:
+                res = self._ex.create_order(  # type: ignore[union-attr]
+                    self._ccxt_symbol, "market", side, abs(contracts)
+                )
         except Exception as exc:  # noqa: BLE001 - reduceOnly 不被支持时退化为普通市价
             if not reduce_only:
                 return OrderResult(ok=False, filled_notional=0.0, message=f"下单失败: {exc}")
