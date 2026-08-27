@@ -126,6 +126,7 @@ def _make_engine(tmp_path: Path, source, backend, **kw) -> AutopilotEngine:
         stop_signal_paths=[tmp_path / "AUTOPILOT_STOP_SIGNAL", tmp_path / "STOP_SIGNAL"],
         cadence_s=0,
         max_bars=kw.get("max_bars"),
+        ledger_file=kw.get("ledger_file"),
         sleep_fn=kw.get("sleep_fn"),
         log=lambda m: None,
     )
@@ -410,6 +411,23 @@ def test_engine_order_retry_succeeds_no_halt(tmp_path):
     reason = eng.run_forever()
     assert reason.startswith("max_bars")  # 未熔断，正常跑完
     assert be.order_calls >= 2
+
+
+def test_engine_run_events_and_ledger_override(tmp_path):
+    """ledger_file 显式指定 → 写旁路文件（D2 补算隔离）；run_start/run_end 分界事件。"""
+    from autopilot.ledger import Ledger
+
+    lg = tmp_path / "compare.ledger.jsonl"
+    be = SimBackend(start_equity=1.0, cost_rate=0.0)
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=1, ledger_file=lg)
+    eng.run_forever()
+
+    assert lg.exists(), "指定 ledger_file 时必须写旁路文件而非默认生产账本"
+    events = [r["name"] for r in Ledger(lg).read_all(types={"event"})]
+    assert events[0] == "run_start"
+    assert events[-1] == "run_end"
+    # 生产路径名未被动过（engine 不会顺手写默认文件）
+    assert not (tmp_path / "autopilot_ledger_TEST_paper.jsonl").exists()
 
 
 def test_classify_action():

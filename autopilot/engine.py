@@ -139,6 +139,7 @@ class AutopilotEngine:
         bar_seconds: int | None = None,
         max_bars: int | None = None,
         ledger_dir: str | Path | None = None,
+        ledger_file: str | Path | None = None,
         sleep_fn: Callable[[float], None] | None = None,
         alerter: Alerter | None = None,
         heartbeat_url: str = "",
@@ -204,9 +205,17 @@ class AutopilotEngine:
         # 非 None 时处理完这么多根新 bar 后退出（冒烟/冒烟测试用；None=永久运行）
         self._max_bars = max_bars
 
-        # 冷账本（E1/ADR-0007）：bar/trade/event 三类行 append-only，审计视图读它
-        self.ledger = Ledger(
-            ledger_path(strategy.symbol, backend.mode, ledger_dir), log=self.log
+        # 冷账本（E1/ADR-0007）：bar/trade/event 三类行 append-only，审计视图读它。
+        # ledger_file 显式指定时用之（D2 离线补算隔离：自定义 state-file 必须配独立账本，
+        # 否则补算的 bar/trade 会污染生产审计与 readiness 门槛计数）
+        lf = Path(ledger_file) if ledger_file else ledger_path(
+            strategy.symbol, backend.mode, ledger_dir
+        )
+        self.ledger = Ledger(lf, log=self.log)
+        self._event(
+            "run_start",
+            f"mode={backend.mode} symbol={strategy.symbol} tf={strategy.timeframe} "
+            f"formula_len={len(strategy.formula)}",
         )
         # 可注入 sleep（下单重试间隔；测试传 no-op 免真等 2s）
         self._sleep = sleep_fn if sleep_fn is not None else time.sleep
@@ -244,6 +253,7 @@ class AutopilotEngine:
                 break
             time.sleep(self.cadence_s)
         self.log(f"[autopilot] 结束 reason={self._halt_reason or 'stopped'}")
+        self._event("run_end", self._halt_reason or "stopped")
         self.ledger.close()
         return self._halt_reason or "stopped"
 

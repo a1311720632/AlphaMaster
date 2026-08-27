@@ -3566,6 +3566,14 @@ let apFillsSig = "";
 function renderApPosition(state) {
   const lb = state?.last_bar;
   const startEq = Number(state?.start_equity) || 0;
+  // 初始权益 hint：paper=起点(10000)；testnet/live=首根 bar 记录的真实余额快照。
+  // 不写死数值——旧账本残留/不同模式起点各异，一切以 state.start_equity 为准
+  const hintEl = $("apTotalReturnHint");
+  if (hintEl) {
+    hintEl.textContent = startEq > 0
+      ? `初始权益 ${Number(startEq).toFixed(2)} USDT · ${state?.mode || ""}`
+      : "初始权益待首根 bar 后记录";
+  }
   const totalRet = state?.realtime_total_return;
   const rtEq = state?.realtime_equity;
   const lastPrice = state?.last_price;

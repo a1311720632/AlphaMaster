@@ -155,6 +155,14 @@ def main(argv: list[str] | None = None) -> int:
     alerter = Alerter(log=_log)
 
     # 5. 引擎
+    state_path = args.state_file or Config.AUTOPILOT_STATE_FILE
+    # D2 隔离：--state-file 补算时账本放 state 文件旁（.ledger.jsonl），
+    # 不与生产冷账本混写（否则污染审计与 readiness 门槛计数）
+    ledger_file = (
+        str(Path(state_path).with_suffix(".ledger.jsonl"))
+        if args.state_file
+        else None
+    )
     engine = AutopilotEngine(
         strategy=strategy,
         datasource=datasource,
@@ -163,10 +171,11 @@ def main(argv: list[str] | None = None) -> int:
         breaker_max_drawdown_pct=Config.AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT,
         breaker_max_bars_stale=Config.AUTOPILOT_BREAKER_MAX_BARS_STALE,
         min_notional_delta=Config.AUTOPILOT_MIN_NOTIONAL_DELTA,
-        state_path=args.state_file or Config.AUTOPILOT_STATE_FILE,
+        state_path=state_path,
         stop_signal_paths=[Config.AUTOPILOT_STOP_SIGNAL, Config.STOP_SIGNAL],
         max_bars=args.max_bars,
         ledger_dir=Config.AUTOPILOT_LEDGER_DIR or None,
+        ledger_file=ledger_file,
         alerter=alerter,
         heartbeat_url=Config.AUTOPILOT_HEARTBEAT_URL,
         heartbeat_max_silent_s=Config.AUTOPILOT_HEARTBEAT_MAX_SILENT_S,
