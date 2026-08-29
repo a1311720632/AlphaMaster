@@ -1738,6 +1738,42 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
 
 .equity-raw .chart-gallery { margin-top: 14px; }
 
+/* ── 已保存策略：公式行内 AI 解读（默认折叠，样式仿 .equity-raw 折叠 + .ai-answer 正文）── */
+.st-explain summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  transition: color 0.2s;
+}
+
+.st-explain summary:hover { color: var(--accent); }
+.st-explain summary::-webkit-details-marker { display: none; }
+
+.st-explain summary::before {
+  content: "▸";
+  font-size: 0.7rem;
+  transition: transform 0.2s;
+}
+
+.st-explain[open] summary::before { transform: rotate(90deg); }
+
+.st-explain-body {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--bg-card-solid);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--font);
+  font-size: 0.78rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  max-height: 300px;
+  overflow: auto;
+}
+
 @media (max-width: 640px) {
   .equity-chart-wrap { height: 260px; }
   .equity-chart-wrap.roll { height: 120px; }

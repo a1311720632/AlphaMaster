@@ -580,11 +580,21 @@ async function loadSymbolChart(symbol, progress) {
 
 let lastStrategies = [];
 let strategiesDelegateBound = false;
+const strategyExplainCache = {};  // file → {text}（会话级；服务端另有磁盘缓存兜底）
+
 function ensureStrategiesDelegate() {
   if (strategiesDelegateBound) return;
   const tbody = $("strategiesBody");
   if (!tbody) return;
   tbody.addEventListener("click", (e) => {
+    // 注意：toggle 事件不冒泡，折叠展开只能靠委托 click；属性名与删除按钮的 data-file 区分开
+    const det = e.target.closest("[data-explain-file]");
+    if (det) {
+      if (!det.open && !strategyExplainCache[det.dataset.explainFile]) {
+        requestStrategyExplanation(det.dataset.explainFile, det);
+      }
+      return;
+    }
     const btn = e.target.closest("[data-file]");
     if (!btn) return;
     removeStrategy(btn.dataset.file);
@@ -592,11 +602,41 @@ function ensureStrategiesDelegate() {
   strategiesDelegateBound = true;
 }
 
+function explainBodyHtml(file) {
+  const c = strategyExplainCache[file];
+  if (!c) {
+    return '<span style="opacity:.6">展开将自动生成 AI 解读（消耗一次 AI 调用，生成后本地+服务端双缓存）…</span>';
+  }
+  if (c.loading) return '<span style="opacity:.6">AI 解读生成中…（首次约 10~60 秒）</span>';
+  if (c.error) return `<span style="color:var(--danger)">${escHtml(c.error)}</span>`;
+  return escHtml(c.text || "（AI 未返回内容）");
+}
+
+async function requestStrategyExplanation(file, det) {
+  strategyExplainCache[file] = { loading: true };
+  const body = det.querySelector(".st-explain-body");
+  if (body) body.innerHTML = '<span style="opacity:.6">AI 解读生成中…（首次约 10~60 秒）</span>';
+  try {
+    const res = await fetchJSON("/api/ai/explain-strategy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strategy_file: file }),
+      silent: true,  // 错误已在行内红字展示，不弹全局框
+    });
+    strategyExplainCache[file] = { text: res.explanation || "（AI 未返回内容）" };
+    if (body) body.textContent = strategyExplainCache[file].text;
+  } catch (e) {
+    strategyExplainCache[file] = { error: e.message || "生成失败" };
+    if (body) body.innerHTML = `<span style="color:var(--danger)">${escHtml(e.message || "生成失败")}</span>`;
+  }
+}
+
 async function removeStrategy(file) {
   if (!file) return;
   if (!confirm(`删除策略 ${file}？此操作不可撤销。`)) return;
   try {
     await fetchJSON("/api/strategies", { method: "DELETE", body: JSON.stringify({ file }) });
+    delete strategyExplainCache[file];
     await refreshOverview();
   } catch (e) {
     showErrorPopup("删除失败", e.message);
@@ -644,7 +684,12 @@ function renderStrategies(rows) {
         <td>${escHtml(r.timeframe || "—")}</td>
         <td>${stepCell}</td>
         <td>${formatScore(r.best_score)}</td>
-        <td><code>${escHtml(r.formula_decoded || "—")}</code></td>
+        <td>
+          <details class="st-explain" data-explain-file="${escHtml(r.file)}">
+            <summary title="点击展开 AI 解读"><code>${escHtml(r.formula_decoded || "—")}</code></summary>
+            <div class="st-explain-body">${explainBodyHtml(r.file)}</div>
+          </details>
+        </td>
         <td><button class="strat-remove" data-file="${escHtml(r.file)}" title="删除">×</button></td>
       </tr>`;
     }
@@ -2884,6 +2929,7 @@ function renderRealtimeGrid(watches) {
 let apActive = false;
 let apInitDone = false;
 let apStrategyFile = "";
+let apBreaker = { enabled: false, pct: 0.10 };  // pct 存 fraction（0.10=10%）；UI 显示百分数
 
 function initAutopilotOnce() {
   if (apInitDone) return;
@@ -2915,6 +2961,11 @@ function initAutopilotOnce() {
   const apFeishuCb = $("apFeishuEnabled");
   if (apFeishuCb) apFeishuCb.addEventListener("change", updateApFeishuStatusHint);
   loadApFeishuSettings();
+  // 回撤熔断开关/阈值（存 web_settings，下次 autopilot 启动生效）
+  const apBreakerCb = $("apBreakerEnabled");
+  if (apBreakerCb) apBreakerCb.addEventListener("change", onApBreakerChange);
+  const apBreakerPct = $("apBreakerPct");
+  if (apBreakerPct) apBreakerPct.addEventListener("change", onApBreakerChange);
   // 从已保存设置恢复模式/品种/周期
   fetchJSON("/api/settings", { silent: true })
     .then(async (s) => {
@@ -2925,6 +2976,18 @@ function initAutopilotOnce() {
         apStrategyFile = s.autopilot_last_strategy;
         renderAutopilotStrategyCard(apStrategyFile);
         updateApStartBtn();
+      }
+      if (s && s.autopilot_breaker_drawdown_pct != null) {
+        apBreaker = {
+          enabled: s.autopilot_breaker_drawdown_enabled === true,
+          pct: Number(s.autopilot_breaker_drawdown_pct) || 0.10,
+        };
+        if (apBreakerCb) apBreakerCb.checked = apBreaker.enabled;
+        const pct = $("apBreakerPct");
+        if (pct && document.activeElement !== pct) {
+          pct.value = String(Math.round(apBreaker.pct * 10000) / 100);
+        }
+        updateApBreakerHint();
       }
       await populateApStrategySelect();  // 填充下拉，并按 apStrategyFile 预选
     })
@@ -2940,6 +3003,35 @@ async function saveApSetting(patch) {
       silent: true,
     });
   } catch (_) {}
+}
+
+// ── 回撤熔断开关/阈值（后端 clamp 到 (0, 0.95]；子进程启动时才读：运行中改动下次启动生效）──
+function onApBreakerChange() {
+  const cb = $("apBreakerEnabled");
+  const pctEl = $("apBreakerPct");
+  let pct = Number(pctEl && pctEl.value);
+  if (!Number.isFinite(pct) || pct <= 0) pct = 10;
+  pct = Math.min(Math.max(pct, 0.5), 95);
+  if (pctEl) pctEl.value = String(pct);
+  apBreaker = { enabled: cb ? cb.checked : false, pct: pct / 100 };
+  updateApBreakerHint();
+  saveApSetting({
+    autopilot_breaker_drawdown_enabled: apBreaker.enabled,
+    autopilot_breaker_drawdown_pct: apBreaker.pct,
+  });
+}
+
+function apBreakerLabel() {
+  const p = Math.round(apBreaker.pct * 10000) / 100;
+  return apBreaker.enabled ? `回撤熔断 −${p}%` : "回撤熔断已关闭";
+}
+
+function updateApBreakerHint() {
+  const hint = $("apBreakerHint");
+  if (!hint) return;
+  const p = Math.round(apBreaker.pct * 10000) / 100;
+  hint.textContent = apBreaker.enabled ? `回撤 −${p}%` : "回撤熔断（关）";
+  hint.title = "运行中改动将于下次启动生效；重新启用按历史峰值权益起算，可能立即触发";
 }
 
 function renderAutopilotStrategyCard(sf) {
@@ -3090,6 +3182,8 @@ async function openApLiveConfirm(mode, symbol, timeframe) {
       `模式 <b>${mode === "live" ? "live · 真实资金" : "testnet · OKX 模拟盘"}</b> · ` +
       `品种 <b>${escHtml(symbol || "(策略内)")}</b> · 周期 <b>${escHtml(timeframe || "(策略内)")}</b>`;
   }
+  const brEl = $("apLiveConfirmBreaker");
+  if (brEl) brEl.textContent = `真实资金 · ${apBreakerLabel()} · 无单笔止盈止损（连续仓位模型）`;
   const hintEl = $("apLiveConfirmSymbolHint");
   if (hintEl) hintEl.textContent = symbol || apStrategyFile.replace(/^.*best_/, "").replace(/\.json$/, "");
   const inputEl = $("apLiveConfirmInput");

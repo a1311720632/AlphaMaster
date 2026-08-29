@@ -45,6 +45,31 @@ def test_drawdown_just_above_threshold_no_trip():
     assert not tripped
 
 
+# ── DrawdownBreaker.enabled（web 可视化开关，默认 True 保持既有语义）──────────
+def test_drawdown_disabled_never_trips_but_tracks():
+    """关闭后深跌不 trip，但 peak/dd 照常跟踪（前端曲线/日报/审计依赖）。"""
+    b = DrawdownBreaker(-0.10, enabled=False)
+    assert b.enabled is False
+    peak, dd, tripped = b.update(100.0)
+    assert (peak, tripped) == (100.0, False) and dd == 0.0
+    peak, dd, tripped = b.update(80.0)    # dd = -20% 远超阈值 → 仍不 trip
+    assert tripped is False
+    assert peak == 100.0
+    assert dd == pytest.approx(-0.20)
+    peak, _, tripped = b.update(200.0)    # 新高照常记录，后续回落仍不 trip
+    assert peak == 200.0 and not tripped
+    _, _, tripped = b.update(150.0)
+    assert not tripped
+
+
+def test_drawdown_default_enabled():
+    """不传 enabled 的既有构造（引擎/测试）语义不变：默认开启、可 trip。"""
+    b = DrawdownBreaker(-0.10)
+    assert b.enabled is True
+    b.update(100.0)
+    assert b.update(89.0)[2]
+
+
 # ── ConnectivityBreaker ──────────────────────────────────────────────────────
 def test_connectivity_trips_after_n_failures():
     b = ConnectivityBreaker(3)

@@ -36,6 +36,11 @@ _DEFAULT = {
     # β 自动续命：标记"用户意图上想让 autopilot 一直跑"。web 重启后据此决定是否
     # 从 autopilot_last_strategy/mode/symbol/timeframe 重拉。stop/reset 置 False。
     "autopilot_intended_running": False,
+    # 回撤熔断（web 可视化开关，生效于【下次 autopilot 启动】）。默认关闭（用户决策）：
+    # 开启时 pct 存「正的小数」0.10 = 10%（引擎侧取负作阈值）；关闭后引擎仍跟踪 peak/回撤
+    # （前端曲线/日报/审计要用），只是永不 trip。
+    "autopilot_breaker_drawdown_enabled": False,
+    "autopilot_breaker_drawdown_pct": 0.10,
 }
 
 
@@ -47,6 +52,55 @@ def _as_pct(value, default: float) -> float:
     if v < 0:
         return default
     return v
+
+
+def _as_drawdown_pct(value, default: float) -> float:
+    """回撤熔断阈值（正小数，0.10 = 10%）。合法域 (0, 0.95]。
+
+    开区间下界是硬要求：pct≤0 时首根 bar 的 dd=0 ≤ 0 会立即 trip 全平；
+    >0.95 无意义（不可达 = 事实关闭，走 enabled 开关表达）。越界/非数/nan
+    一律回落 default，绝不 clamp 进危险区。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not (v > 0.0) or v > 0.95 or v != v:  # 覆盖 ≤0、>0.95、nan/inf
+        return default
+    return v
+
+
+def load_raw_settings() -> dict:
+    """读原始 JSON（不填默认、不清洗）。用于区分「用户在 web 显式设过」与「从未设」：
+    前者优先；后者让位给 Config 的 env 覆盖（服务器用 env 设不可达阈值关熔断的既定
+    手法，config.py AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT 注释）。"""
+    if not SETTINGS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def drawdown_breaker_config(raw: dict | None = None) -> tuple[bool, float]:
+    """回撤熔断生效配置 (enabled, 正小数 pct)，run_autopilot 与 preflight 共用的唯一真源。
+
+    优先级：web_settings 显式键 > Config env（abs 后作兜底幅度）。env 设了不可达
+    阈值（如 -2.0）→ pct 越界 → 视为关闭（诚实映射既定的 off 手法）。
+    """
+    from config import Config  # 局部导入：settings 模块保持零重依赖
+
+    if raw is None:
+        raw = load_raw_settings()
+    enabled = bool(raw.get("autopilot_breaker_drawdown_enabled", False))
+    pct = _as_drawdown_pct(
+        raw.get("autopilot_breaker_drawdown_pct"),
+        abs(float(Config.AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT)),
+    )
+    if pct <= 0.0 or pct > 0.95:  # env 不可达阈值（-2.0 off 手法）＝ 事实关闭
+        return False, pct
+    return enabled, pct
 
 
 def _is_ephemeral_data_path(path: str) -> bool:
@@ -157,6 +211,12 @@ def load_settings() -> dict:
     out["tqsdk_user"] = str(out.get("tqsdk_user") or "").strip()
     out["tqsdk_password"] = str(out.get("tqsdk_password") or "").strip()
     out["autopilot_intended_running"] = bool(out.get("autopilot_intended_running", False))
+    out["autopilot_breaker_drawdown_enabled"] = bool(
+        out.get("autopilot_breaker_drawdown_enabled", False)
+    )
+    out["autopilot_breaker_drawdown_pct"] = _as_drawdown_pct(
+        out.get("autopilot_breaker_drawdown_pct"), _DEFAULT["autopilot_breaker_drawdown_pct"]
+    )
     recovered = _recover_last_data_file(out)
     if recovered != out.get("last_data_file") and _is_production_settings_path():
         out["last_data_file"] = recovered
@@ -246,6 +306,14 @@ def save_settings(data: dict) -> dict:
         current["autopilot_timeframe"] = str(data["autopilot_timeframe"] or "").strip()
     if "autopilot_intended_running" in data:
         current["autopilot_intended_running"] = bool(data["autopilot_intended_running"])
+    if "autopilot_breaker_drawdown_enabled" in data:
+        current["autopilot_breaker_drawdown_enabled"] = bool(
+            data["autopilot_breaker_drawdown_enabled"]
+        )
+    if "autopilot_breaker_drawdown_pct" in data:
+        current["autopilot_breaker_drawdown_pct"] = _as_drawdown_pct(
+            data["autopilot_breaker_drawdown_pct"], _DEFAULT["autopilot_breaker_drawdown_pct"]
+        )
     SETTINGS_PATH.write_text(
         json.dumps(current, indent=2, ensure_ascii=False),
         encoding="utf-8",

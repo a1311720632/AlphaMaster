@@ -8,8 +8,16 @@
   "bt_slippage_pct": 0.01,
   "realtime_watches": [],
   "feishu_enabled": false,
+  "feishu_autopilot_enabled": true,
   "feishu_webhook_url": "",
   "feishu_secret": "",
   "tqsdk_user": "七斗居士",
-  "tqsdk_password": "ghhkphs8"
+  "tqsdk_password": "ghhkphs8",
+  "autopilot_mode": "paper",
+  "autopilot_last_strategy": "",
+  "autopilot_symbol": "",
+  "autopilot_timeframe": "",
+  "autopilot_intended_running": false,
+  "autopilot_breaker_drawdown_enabled": false,
+  "autopilot_breaker_drawdown_pct": 0.10
 }

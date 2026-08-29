@@ -37,7 +37,7 @@ from web.server_log import (
     set_debug_mode,
     setup_logging,
 )
-from web.settings import load_settings, save_settings
+from web.settings import drawdown_breaker_config, load_settings, save_settings
 from web.strategy_file import (
     inspect_strategy_file,
     resolve_strategy_file,
@@ -97,12 +97,27 @@ class SettingsRequest(BaseModel):
     ai_api_key: str | None = None
     bt_commission_pct: float | None = None
     bt_slippage_pct: float | None = None
+    # pydantic 默认丢弃未声明字段——下面 autopilot_* 是 saveApSetting 的落盘通道，缺了
+    # 会被静默丢包（autopilot_last_strategy 此前就踩过这个坑）
+    autopilot_mode: str | None = None
+    autopilot_last_strategy: str | None = None
+    autopilot_symbol: str | None = None
+    autopilot_timeframe: str | None = None
+    # 回撤熔断（生效于下次 autopilot 启动；pct 为正小数 0.10=10%，后端 clamp 到 (0,0.95]）
+    autopilot_breaker_drawdown_enabled: bool | None = None
+    autopilot_breaker_drawdown_pct: float | None = None
 
 
 class AnalyzeTrainingRequest(BaseModel):
     provider: str | None = None
     api_key: str | None = None
     symbol: str | None = None
+
+
+class ExplainStrategyRequest(BaseModel):
+    strategy_file: str
+    provider: str | None = None
+    api_key: str | None = None
 
 
 class StartBacktestRequest(BaseModel):
@@ -391,6 +406,18 @@ def api_put_settings(req: SettingsRequest) -> dict[str, Any]:
         payload["bt_commission_pct"] = req.bt_commission_pct
     if req.bt_slippage_pct is not None:
         payload["bt_slippage_pct"] = req.bt_slippage_pct
+    if req.autopilot_mode is not None:
+        payload["autopilot_mode"] = req.autopilot_mode
+    if req.autopilot_last_strategy is not None:
+        payload["autopilot_last_strategy"] = req.autopilot_last_strategy
+    if req.autopilot_symbol is not None:
+        payload["autopilot_symbol"] = req.autopilot_symbol
+    if req.autopilot_timeframe is not None:
+        payload["autopilot_timeframe"] = req.autopilot_timeframe
+    if req.autopilot_breaker_drawdown_enabled is not None:
+        payload["autopilot_breaker_drawdown_enabled"] = req.autopilot_breaker_drawdown_enabled
+    if req.autopilot_breaker_drawdown_pct is not None:
+        payload["autopilot_breaker_drawdown_pct"] = req.autopilot_breaker_drawdown_pct
     saved = save_settings(payload)
     if req.debug_mode is not None:
         set_debug_mode(req.debug_mode)
@@ -444,14 +471,10 @@ def api_ai_providers() -> dict[str, Any]:
     return status
 
 
-@app.post("/api/ai/analyze-training")
-def api_ai_analyze_training(req: AnalyzeTrainingRequest):
-    from fastapi.responses import StreamingResponse
-
-    from web.ai_analyze import analyze_training_stream
-
+def _resolve_ai_channel(req_provider: str | None, req_api_key: str | None) -> tuple[str, str]:
+    """AI 渠道解析：请求里的 key（含别名前缀）优先，落 web_settings 兜底；结果回存 settings。"""
     settings = load_settings()
-    raw_key = req.api_key if req.api_key is not None else settings.get("ai_api_key") or ""
+    raw_key = req_api_key if req_api_key is not None else settings.get("ai_api_key") or ""
     key_lower = str(raw_key).strip().lower()
 
     # openclaw_wb 必须先于 openclaw 判断
@@ -460,18 +483,28 @@ def api_ai_analyze_training(req: AnalyzeTrainingRequest):
     elif key_lower in ("openclaw",) or key_lower.startswith("openclaw/"):
         provider = "openclaw"
     else:
-        provider = (req.provider or settings.get("ai_provider") or "deepseek").strip()
+        provider = (req_provider or settings.get("ai_provider") or "deepseek").strip()
 
     save_settings({
         "ai_provider": provider,
         "ai_api_key": str(raw_key).strip(),
     })
+    return provider, str(raw_key).strip()
+
+
+@app.post("/api/ai/analyze-training")
+def api_ai_analyze_training(req: AnalyzeTrainingRequest):
+    from fastapi.responses import StreamingResponse
+
+    from web.ai_analyze import analyze_training_stream
+
+    provider, key = _resolve_ai_channel(req.provider, req.api_key)
 
     def event_gen():
         try:
             for event in analyze_training_stream(
                 provider=provider,
-                api_key=str(raw_key).strip() or None,
+                api_key=key or None,
                 symbol=req.symbol,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -487,6 +520,65 @@ def api_ai_analyze_training(req: AnalyzeTrainingRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/api/ai/explain-strategy")
+def api_ai_explain_strategy(req: ExplainStrategyRequest) -> dict[str, Any]:
+    """单策略公式 AI 解读（非流式）。缓存命中不调 LLM；公式或词表一变自动重生成。"""
+    from datetime import datetime, timezone
+
+    from web.ai_analyze import (
+        _formula_hash,
+        explain_strategy,
+        load_explanation,
+        save_explanation,
+    )
+
+    path = _resolve_strategy_file_safe(req.strategy_file)
+    if path is None:
+        raise HTTPException(400, "无效的策略文件名（须为 strategies/ 下 best_*.json）")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, f"策略文件读取失败: {exc}") from exc
+    formula = data.get("formula")
+    if not isinstance(formula, list) or not formula:
+        raise HTTPException(400, "策略文件缺少 formula，无法解读")
+
+    fhash = _formula_hash(data.get("vocab_version"), formula)
+    cached = load_explanation(path.name, fhash)
+    if cached:
+        return {
+            "ok": True,
+            "cached": True,
+            "explanation": cached.get("explanation") or "",
+            "provider": cached.get("provider"),
+            "model": cached.get("model"),
+            "explained_at": cached.get("explained_at"),
+        }
+
+    provider, key = _resolve_ai_channel(req.provider, req.api_key)
+    strategy = {
+        "symbol": data.get("symbol") or path.stem.replace("best_", "", 1),
+        "timeframe": data.get("timeframe"),
+        "best_score": data.get("best_score"),
+        "formula": formula,
+        "formula_decoded": data.get("formula_decoded"),
+    }
+    try:
+        result = explain_strategy(provider=provider, api_key=key, strategy=strategy)
+    except ValueError as exc:  # 渠道/密钥问题（resolve_provider 的用户向文案）
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:  # AI 请求失败
+        raise HTTPException(502, str(exc)) from exc
+
+    explained_at = datetime.now(timezone.utc).isoformat()
+    save_explanation(
+        path.name, fhash,
+        {**result, "explained_at": explained_at,
+         "symbol": strategy["symbol"], "timeframe": strategy["timeframe"]},
+    )
+    return {"ok": True, "cached": False, **result, "explained_at": explained_at}
 
 
 @app.post("/api/data-file/browse")
@@ -1423,7 +1515,23 @@ def _autopilot_preflight_checks(mode: str, symbol: str | None, timeframe: str | 
     except Exception as exc:  # noqa: BLE001
         add("state_match", "state 三元组匹配", "warn", f"读取失败: {exc}")
 
-    # 5. testnet 达标清单（仅 live；D1：2-4 周长跑机检）
+    # 5. 回撤熔断配置（仅提示不拦截：关闭是用户的显式选择，warn 不参与 ok 计算）
+    try:
+        br_enabled, br_pct = drawdown_breaker_config()
+        if br_enabled:
+            add(
+                "breaker_drawdown", "回撤熔断配置", "pass",
+                f"峰值回撤 ≤ {br_pct * 100:.1f}% 全平停机（本次启动生效）",
+            )
+        else:
+            add(
+                "breaker_drawdown", "回撤熔断配置", "warn",
+                "已关闭——无自动回撤停机；重新启用时按历史峰值权益起算，可能立即触发",
+            )
+    except Exception as exc:  # noqa: BLE001
+        add("breaker_drawdown", "回撤熔断配置", "warn", f"读取失败: {exc}")
+
+    # 6. testnet 达标清单（仅 live；D1：2-4 周长跑机检）
     if mode == "live":
         try:
             from autopilot.ledger import ledger_path

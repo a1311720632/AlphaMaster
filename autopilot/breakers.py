@@ -31,14 +31,28 @@ class DrawdownBreaker:
 
     initial_peak（B1/ADR-0007）：进程重启时回填上次运行留下的峰值权益，使回撤基线
     跨重启连续——否则每次重启白送一次新的 −10% 额度（peak 从 -inf 重新起算）。
+
+    enabled=False（web 可视化开关）：只记录 peak/dd 供展示（前端曲线/日报/审计），
+    永不 trip。
     """
 
-    def __init__(self, max_drawdown_pct: float, initial_peak: float | None = None) -> None:
-        # max_drawdown_pct 为负数，如 -0.10
+    def __init__(
+        self,
+        max_drawdown_pct: float,
+        initial_peak: float | None = None,
+        *,
+        enabled: bool = True,
+    ) -> None:
+        # max_drawdown_pct 为负数，如 -0.10；enabled=False 时只跟踪不熔断
         self._threshold = float(max_drawdown_pct)
+        self._enabled = bool(enabled)
         self._peak = float(initial_peak) if (initial_peak is not None and initial_peak > 0) else float("-inf")
         self._tripped = False
         self._reason = ""
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
 
     @property
     def tripped(self) -> bool:
@@ -53,11 +67,11 @@ class DrawdownBreaker:
         return self._reason
 
     def update(self, equity: float) -> tuple[float, float, bool]:
-        """更新峰值权益。返回 (peak, drawdown_pct, tripped)。"""
+        """更新峰值权益。返回 (peak, drawdown_pct, tripped)。关闭时恒 (peak, dd, False)。"""
         if equity > self._peak:
             self._peak = equity
         dd = 0.0 if self._peak <= 0 else (equity - self._peak) / self._peak
-        if not self._tripped and dd <= self._threshold:
+        if self._enabled and not self._tripped and dd <= self._threshold:
             self._tripped = True
             self._reason = (
                 f"回撤熔断: 回撤 {dd * 100:.2f}% ≤ 阈值 {self._threshold * 100:.2f}%"

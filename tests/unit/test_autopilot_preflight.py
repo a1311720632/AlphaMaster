@@ -125,3 +125,26 @@ def test_preflight_rejects_paper_mode():
         "strategy_file": "x", "mode": "paper",
     })
     assert resp.status_code == 400
+
+
+def test_preflight_shows_breaker_drawdown_status(monkeypatch):
+    """回撤熔断信息项：关闭 → warn（不拦截）；启用 5% → pass 且 detail 含 5.0%。"""
+    import fastapi.testclient
+
+    import web.app as app_mod
+    from web.app import app
+
+    client = fastapi.testclient.TestClient(app)
+    body = {
+        "strategy_file": "strategies/best_BTCUSDT.json",
+        "mode": "testnet", "symbol": "BTCUSDT", "timeframe": "1h",
+    }
+
+    monkeypatch.setattr(app_mod, "drawdown_breaker_config", lambda: (False, 0.10))
+    ids = {c["id"]: c["status"] for c in client.post("/api/autopilot/preflight", json=body).json()["checks"]}
+    assert ids["breaker_drawdown"] == "warn"
+
+    monkeypatch.setattr(app_mod, "drawdown_breaker_config", lambda: (True, 0.05))
+    checks = {c["id"]: c for c in client.post("/api/autopilot/preflight", json=body).json()["checks"]}
+    assert checks["breaker_drawdown"]["status"] == "pass"
+    assert "5.0%" in checks["breaker_drawdown"]["detail"]

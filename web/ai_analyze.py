@@ -380,3 +380,114 @@ def _history_summary(history: dict[str, Any]) -> dict[str, Any]:
         summary["entropy_first"] = entropy[0]
         summary["entropy_last"] = entropy[-1]
     return summary
+
+
+# ── 策略公式解读（第一步「已保存策略」：按需生成 + 服务端磁盘缓存）────────────
+# 与训练分析复用 provider 链路（resolve_provider / chat_completions），但 prompt 独立：
+# 训练分析面向"要不要继续练"，这里只讲"这个公式在做什么"。解释有 LLM 成本，按
+# ai_analysis_history.json 的先例落盘缓存，key=文件名，公式或词表一变（hash 失配）自动失效。
+
+_EXPLAIN_CACHE_PATH = PROJECT_ROOT / "strategy_explanations.json"
+
+_EXPLAIN_SYSTEM_PROMPT = """你是量化因子公式讲解员。
+AlphaMaster 的策略公式是一串 token（特征与算子），按顺序经栈式虚拟机执行后得到一个标量因子值；
+仓位 = tanh(因子值)：因子看多就持多头、看空就持空头，信号太弱时平仓观望。
+请基于给定的公式信息，用中文通俗解释这个策略的含义与原理。
+
+要求：
+- 按公式的书写顺序逐段讲：每个特征大概在看什么（比如涨跌趋势、波动大小、成交量、
+  超买超卖、与近期高低点的位置关系等），每个算子在做什么数学操作（比如取平均、求差、
+  找最大值、缩放等）。
+- 最后合起来讲清楚：这串公式整体在捕捉什么行情模式，什么情况下会做多、什么情况下会做空、
+  什么情况下会平仓观望。
+- 大白话为主，少用术语；必须用到的术语请顺带一句大白话解释。
+- 只解释公式里出现的内容，不要编造公式里没有的东西；信息不足以判断的部分要明说。
+- 篇幅 200~400 字，分 2~4 个小段，不要用 markdown 标题。
+"""
+
+
+def build_explain_user_message(strategy: dict[str, Any]) -> str:
+    """组装解读请求的 user message。typed_tokens 按词表分型（token < operator_offset → 特征）。"""
+    from model_core.vocab import FORMULA_VOCAB
+
+    names = FORMULA_VOCAB.token_names
+    offset = FORMULA_VOCAB.operator_offset
+    typed: list[str] = []
+    for t in strategy.get("formula") or []:
+        try:
+            name = names[t] if 0 <= t < len(names) else f"?{t}"
+            typed.append(("算子·" if t >= offset else "特征·") + str(name))
+        except (TypeError, ValueError):
+            continue
+
+    parts = ["请解释下面这个已训练策略的公式：", ""]
+    parts.append(f"品种：{strategy.get('symbol') or '未知'}")
+    parts.append(f"周期：{strategy.get('timeframe') or '未知'}")
+    score = strategy.get("best_score")
+    if score is not None:
+        parts.append(f"训练框架给的分数（衡量这个公式历史表现的好坏，仅供参考）：{score}")
+    if strategy.get("formula_decoded"):
+        parts.append(f"公式（可读名，按执行顺序）：{strategy['formula_decoded']}")
+    if typed:
+        parts.append("公式分步（特征=输入的数据维度，算子=对数据的数学操作）：")
+        parts.extend(f"  {i + 1}. {x}" for i, x in enumerate(typed))
+    parts.append("")
+    parts.append("请按系统提示要求，通俗解释这个公式的含义与原理。")
+    return "\n".join(parts)
+
+
+def _formula_hash(vocab_version: str | None, formula: list[int] | None) -> str:
+    import hashlib
+
+    payload = json.dumps(
+        {"v": vocab_version or "", "f": list(formula or [])},
+        ensure_ascii=False, sort_keys=True,
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _load_explain_cache() -> dict[str, Any]:
+    try:
+        data = json.loads(_EXPLAIN_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_explanation(file: str, formula_hash: str) -> dict[str, Any] | None:
+    """命中返回缓存条目；无缓存/公式或词表已变（hash 失配）→ None。"""
+    entry = _load_explain_cache().get(file)
+    if not isinstance(entry, dict) or entry.get("formula_hash") != formula_hash:
+        return None
+    return entry
+
+
+def save_explanation(file: str, formula_hash: str, payload: dict[str, Any]) -> None:
+    data = _load_explain_cache()
+    data[file] = {"formula_hash": formula_hash, **payload}
+    try:
+        _EXPLAIN_CACHE_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass  # 缓存写失败不影响主流程（下次重新生成即可）
+
+
+def explain_strategy(
+    *, provider: str, api_key: str | None = None, strategy: dict[str, Any]
+) -> dict[str, Any]:
+    """生成单个策略公式的 AI 解读（非流式）。返回 {explanation, provider, model, label}。"""
+    from web.ai_providers import chat_completions
+
+    resolved = resolve_provider(provider, api_key)
+    messages = [
+        {"role": "system", "content": _EXPLAIN_SYSTEM_PROMPT},
+        {"role": "user", "content": build_explain_user_message(strategy)},
+    ]
+    text = chat_completions(resolved, messages, max_tokens=2048)
+    return {
+        "explanation": text,
+        "provider": resolved.provider,
+        "model": resolved.model,
+        "label": resolved.label,
+    }

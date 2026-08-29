@@ -82,6 +82,14 @@ def _build_datasource() -> object:
     return FallbackDataSource(sources, max_fails_per_source=Config.AUTOPILOT_FALLBACK_MAX_FAILS)
 
 
+def _resolve_drawdown_breaker() -> tuple[bool, float]:
+    """回撤熔断生效配置 (enabled, 正小数 pct)。真源在 web.settings.drawdown_breaker_config
+    （web_settings 显式键 > Config env；env 不可达阈值 = 事实关闭）。包一层便于单测。"""
+    from web.settings import drawdown_breaker_config
+
+    return drawdown_breaker_config()
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="AlphaMaster 自动驾驶（第四步）")
     p.add_argument("--strategy-file", required=True, help="策略 best_{symbol}.json 路径")
@@ -154,6 +162,13 @@ def main(argv: list[str] | None = None) -> int:
 
     alerter = Alerter(log=_log)
 
+    # 4.5 回撤熔断配置（web 设置 > Config env；本次启动读一次，进程内不再变）
+    breaker_enabled, breaker_pct = _resolve_drawdown_breaker()
+    _log(
+        f"[autopilot] 回撤熔断: {'启用' if breaker_enabled else '关闭'}"
+        + (f"（峰值回撤 ≤ {breaker_pct * 100:.2f}% 全平停机）" if breaker_enabled else "")
+    )
+
     # 5. 引擎
     state_path = args.state_file or Config.AUTOPILOT_STATE_FILE
     # D2 隔离：--state-file 补算时账本放 state 文件旁（.ledger.jsonl），
@@ -168,7 +183,8 @@ def main(argv: list[str] | None = None) -> int:
         datasource=datasource,
         backend=backend,
         lookback_bars=Config.AUTOPILOT_LOOKBACK_BARS,
-        breaker_max_drawdown_pct=Config.AUTOPILOT_BREAKER_MAX_DRAWDOWN_PCT,
+        breaker_max_drawdown_pct=-breaker_pct,  # 引擎侧约定负数阈值
+        breaker_drawdown_enabled=breaker_enabled,
         breaker_max_bars_stale=Config.AUTOPILOT_BREAKER_MAX_BARS_STALE,
         min_notional_delta=Config.AUTOPILOT_MIN_NOTIONAL_DELTA,
         state_path=state_path,

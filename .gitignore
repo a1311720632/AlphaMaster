@@ -80,6 +80,7 @@ verification_results.json
 portfolio_state.json
 web_settings.json
 ai_analysis_history.json
+strategy_explanations.json
 train_elapsed.json
 training_time_*.json
 STOP_SIGNAL

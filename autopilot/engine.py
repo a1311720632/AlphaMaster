@@ -14,7 +14,7 @@ import math
 import time
 import urllib.request
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -120,6 +120,16 @@ def _realized_pnl(
     return math.copysign(closed, before) * (fill_price / entry_before - 1.0)
 
 
+def _fmt_ts(ts: int) -> str:
+    """Unix 秒 → 人读时间（UTC 标注，与冷账本/日报的 UTC 口径一致）。
+
+    ≤0 无 bar 语义（空账本首启），原样返回避免打出 1970 年的假时刻。
+    """
+    if int(ts) <= 0:
+        return str(ts)
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M") + " UTC"
+
+
 class AutopilotEngine:
     """模式无关的调仓主循环。装配好后调用 run_forever()。"""
 
@@ -131,7 +141,8 @@ class AutopilotEngine:
         backend: ExecutionBackend,
         lookback_bars: int,
         breaker_max_drawdown_pct: float,
-        breaker_max_bars_stale: int,
+        breaker_drawdown_enabled: bool = True,
+        breaker_max_bars_stale: int = 3,
         min_notional_delta: float,
         state_path: str | Path,
         stop_signal_paths: list[str | Path],
@@ -159,7 +170,10 @@ class AutopilotEngine:
         self.cadence_s = int(cadence_s if cadence_s is not None else _CADENCE.get(tf, 60))
         self.bar_seconds = int(bar_seconds if bar_seconds else _TF_SECONDS.get(tf, 3600))
 
-        self.drawdown = DrawdownBreaker(breaker_max_drawdown_pct)
+        self.breaker_drawdown_enabled = bool(breaker_drawdown_enabled)
+        self.drawdown = DrawdownBreaker(
+            breaker_max_drawdown_pct, enabled=self.breaker_drawdown_enabled
+        )
         self.connectivity = ConnectivityBreaker(breaker_max_bars_stale)
         self.monitors = Monitors()
 
@@ -176,9 +190,12 @@ class AutopilotEngine:
             self.state = loaded
             # B1/ADR-0007：回填 peak 使回撤基线跨重启连续——重启进程 ≠ 重置熔断额度
             if loaded.peak_equity > 0:
-                self.drawdown = DrawdownBreaker(breaker_max_drawdown_pct, loaded.peak_equity)
+                self.drawdown = DrawdownBreaker(
+                    breaker_max_drawdown_pct, loaded.peak_equity,
+                    enabled=self.breaker_drawdown_enabled,
+                )
             self.log(
-                f"[autopilot] 恢复状态: last_ts={loaded.last_ts} peak={loaded.peak_equity:.6f}"
+                f"[autopilot] 恢复状态: last_ts={_fmt_ts(loaded.last_ts)} peak={loaded.peak_equity:.6f}"
             )
         else:
             self.state = AutopilotState(
@@ -233,7 +250,7 @@ class AutopilotEngine:
         self._hb_url = (heartbeat_url or "").strip()
         self._hb_max_silent = int(heartbeat_max_silent_s)
         self._hb_last_ok = 0.0
-        # 每日摘要的上一根 bar UTC 日（B4：摘要兼心跳）
+        # 昨日日报的 UTC 日标记（B4：摘要兼心跳）。壁钟驱动，日切+5min 发送
         self._last_day = ""
 
         # 空账本首启保护（b 决策，testnet/live）：当前这根进行中的 bar 只观察不下单，
@@ -253,7 +270,8 @@ class AutopilotEngine:
         self.log(
             f"[autopilot] 启动 mode={self.backend.mode} symbol={self.strategy.symbol} "
             f"tf={self.strategy.timeframe} formula_len={len(self.strategy.formula)} "
-            f"lookback={self.lookback} cadence={self.cadence_s}s"
+            f"lookback={self.lookback} cadence={self.cadence_s}s "
+            f"dd_breaker={'on' if self.breaker_drawdown_enabled else 'off'}"
         )
         while True:
             if self._stop_signalled():
@@ -265,6 +283,10 @@ class AutopilotEngine:
                 self._tick()
             except Exception as exc:  # noqa: BLE001 - 单 tick 异常不杀进程
                 self.log(f"[autopilot] tick 异常: {exc}")
+            try:
+                self._maybe_daily_digest()  # 壁钟驱动：UTC 日切+5min 发昨日日报
+            except Exception as exc:  # noqa: BLE001 - 日报异常同样不杀交易循环
+                self.log(f"[autopilot] 日报异常: {exc}")
             if self._halt_reason:
                 break
             if self._max_bars is not None and len(self.state.history) >= self._max_bars:
@@ -513,10 +535,9 @@ class AutopilotEngine:
         )
         self.state.record(rec)
         self.ledger.append("bar", asdict(rec))
-        self._maybe_daily_digest(ts, equity, dd)
         self._save()
         self.log(
-            f"[autopilot] ts={ts} pos={target_pos:+.4f} "
+            f"[autopilot] bar_ts={_fmt_ts(ts)} pos={target_pos:+.4f} "
             f"target_notional={target_notional:+.4f} actual={actual_notional:+.4f} "
             f"equity={equity:.6f} dd={dd * 100:.2f}%"
             + (f" alerts={rec.alerts}" if rec.alerts else "")
@@ -554,41 +575,88 @@ class AutopilotEngine:
         except Exception:  # noqa: BLE001 - ping 失败不影响交易路径
             pass
 
-    def _maybe_daily_digest(self, cur_ts: int, equity: float, dd: float) -> None:
-        """UTC 日切 → 发昨日摘要（B4：摘要兼系统心跳）。数据不足静默跳过。"""
-        day = datetime.fromtimestamp(cur_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    def _maybe_daily_digest(self, now_s: float | None = None) -> None:
+        """UTC 日切 +5min → 发昨日日报（B4：摘要兼系统心跳）。数据不足静默跳过。
+
+        壁钟驱动，由 run_forever 每轮调用（cadence 默认 60s），不再挂 bar 收盘——
+        1h bar 下按 bar 判日切要等到 01:00 UTC 才触发，现在 00:05 UTC 准点发。
+        critical 发送绕过 Alerter 节流：日报天然日频无刷屏，而节流（同 key 置位后
+        无人 resolve）会让"摘要停发=系统死的次级信号"（ADR-0007 决策5）变成常态
+        静默、只发出第一份。当日% 口径 =（昨收 − 前收）/ 前收，收盘对收盘，
+        与回测 target_ret 的 close-to-close 同口径；前一日无数据（如上线首日）
+        退回昨日首根权益作基准。
+        """
+        now_dt = datetime.fromtimestamp(
+            int(now_s if now_s is not None else time.time()), tz=timezone.utc
+        )
+        if now_dt.hour * 3600 + now_dt.minute * 60 + now_dt.second < 300:
+            return  # 日切后 5min 内不发（00:00–00:05 UTC）
+        day = now_dt.strftime("%Y-%m-%d")
         prev = self._last_day
         self._last_day = day
         if not prev or prev == day:
             return
-        # 从 hot state history 聚合昨日（cap 1000 内必有昨日全天）
-        day_rows = [
-            h for h in self.state.history
-            if datetime.fromtimestamp(int(h["ts"]), tz=timezone.utc).strftime("%Y-%m-%d") == prev
-        ]
+
+        def rows_of(d: str) -> list[dict]:
+            return [
+                h for h in self.state.history
+                if datetime.fromtimestamp(int(h["ts"]), tz=timezone.utc).strftime("%Y-%m-%d") == d
+            ]
+
+        # 从 hot state history 聚合昨日与前日（cap 1000 ≈ 41 天，1h bar 下两天全在）
+        day_rows = rows_of(prev)
         if not day_rows:
             return
-        first_eq = float(day_rows[0].get("equity") or 0.0)
         last_eq = float(day_rows[-1].get("equity") or 0.0)
-        start_of_day = first_eq  # 保守：昨日首根权益为基准
-        if start_of_day <= 0:
+        prev2 = (datetime.strptime(prev, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                 - timedelta(days=1)).strftime("%Y-%m-%d")
+        base_rows = rows_of(prev2)
+        base = (float(base_rows[-1].get("equity") or 0.0) if base_rows
+                else float(day_rows[0].get("equity") or 0.0))
+        if last_eq <= 0 or base <= 0:
             return
-        day_ret = (last_eq - start_of_day) / start_of_day
+        day_ret = (last_eq - base) / base
         trades_cnt = sum(
             1 for t in self.state.trades
             if datetime.fromtimestamp(int(t["ts"]), tz=timezone.utc).strftime("%Y-%m-%d") == prev
         )
-        self._notify(
-            "daily_digest",
-            f"[autopilot][{self.strategy.symbol}] {prev} 日报：权益 {last_eq:.2f}，"
-            f"当日 {day_ret * 100:+.2f}%，回撤 {dd * 100:.2f}%，成交 {trades_cnt} 笔",
+
+        mood = "小赚一笔 ✌️" if day_ret > 0 else ("小亏，一杯奶茶的钱 🥤" if day_ret < 0 else "原地踏步，深藏功与名")
+        trades_txt = f"昨日成交 {trades_cnt} 笔，bot 搬砖不停歇 💪" if trades_cnt else "昨日 0 单成交，安静持有躺平中 🐢"
+        text = (
+            f"[autopilot][{self.strategy.symbol}] 📊 {prev} 日报\n"
+            f"💰 权益 {last_eq:.2f} USDT，当日 {day_ret * 100:+.2f}%，{mood}\n"
+            f"📦 当前仓位：{self._position_digest_text()}\n"
+            f"🔁 {trades_txt}"
         )
-        self.state.breaker_tripped = bool(self._halt_reason)
-        self.state.breaker_reason = self._halt_reason
+        self.log(f"[autopilot] [digest] {text}")
+        if self.alerter is not None:
+            self.alerter.send("daily_digest", text, critical=True)
+        self._save()
+
+    def _position_digest_text(self) -> str:
+        """日报持仓描述：后端实时明细为准，拉取失败退回末根 bar 快照。"""
+        actual: float | None = None
+        entry = unreal = 0.0
         try:
-            self.state.save(self.state_path)
-        except OSError as exc:  # noqa: BLE001
-            self.log(f"[autopilot] 状态保存失败: {exc}")
+            actual, entry, unreal = self.backend.fetch_position_detail(self.strategy.symbol)
+            actual = float(actual)
+        except Exception:  # noqa: BLE001 - 持仓查询失败不拦日报
+            if self.state.history:
+                last = self.state.history[-1]
+                actual = float(last.get("actual_notional") or 0.0)
+                entry = float(last.get("entry_price") or 0.0)
+                unreal = float(last.get("unrealized_pnl") or 0.0)
+        if actual is None:
+            return "查询失败，看板自提 🔍"
+        if abs(actual) < 1e-9:
+            return "空仓休息 🍹"
+        detail = f"{'多头' if actual > 0 else '空头'} {abs(actual):.2f} USDT"
+        if float(entry) > 0:
+            detail += f"，开仓价 {float(entry):.2f}"
+        if float(unreal):
+            detail += f"，浮盈亏 {float(unreal):+.2f} USDT"
+        return detail
 
     def _halt(self, reason: str) -> None:
         if not self._halt_reason:

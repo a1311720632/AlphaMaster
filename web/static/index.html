@@ -594,13 +594,20 @@
           <label class="field-inline">周期
             <input type="text" id="apTimeframe" placeholder="留空用策略里的（如 1h）" />
           </label>
+          <label class="field-inline" style="flex-direction:row;align-items:center;gap:8px;min-width:auto;cursor:pointer;align-self:flex-end;padding-bottom:6px;">
+            <input type="checkbox" id="apBreakerEnabled" style="accent-color:var(--accent);width:15px;height:15px;" />
+            <span>回撤熔断</span>
+          </label>
+          <label class="field-inline">熔断回撤 %
+            <input type="number" id="apBreakerPct" min="0.5" max="95" step="0.5" value="10" style="width:96px;" />
+          </label>
         </div>
         <div class="launch-actions" role="group" aria-label="自动驾驶操作">
           <button class="btn btn-primary" id="apStartBtn" disabled>启动</button>
           <button class="btn btn-danger" id="apStopBtn" disabled>停止</button>
           <button class="btn btn-secondary" id="apResetBtn" title="停止自动驾驶并清空所有历史记录，权益回到初始">一键清除</button>
         </div>
-        <small class="field-hint">连续仓位·对齐回测（无单笔止盈止损）；testnet/live 启动前会跑预检（ccxt/凭据/账本匹配）。停机靠回撤/断网/执行熔断。</small>
+        <small class="field-hint">连续仓位·对齐回测（无单笔止盈止损）；testnet/live 启动前会跑预检（ccxt/凭据/账本匹配）。停机靠<span id="apBreakerHint" title="运行中改动将于下次启动生效；重新启用按历史峰值权益起算">回撤熔断（关）</span>/断网/执行熔断。</small>
       </div>
     </section>
 
@@ -758,7 +765,7 @@
         <div class="modal-body">
           <div id="apLiveConfirmMeta" style="font-size:13px;margin-bottom:10px;"></div>
           <ul id="apPreflightList" style="list-style:none;padding:0;margin:0 0 12px;font-size:13px;"></ul>
-          <div style="color:#f87171;font-size:12px;margin-bottom:10px;">
+          <div style="color:#f87171;font-size:12px;margin-bottom:10px;" id="apLiveConfirmBreaker">
             真实资金 · 回撤熔断 −10% · 无单笔止盈止损（连续仓位模型）
           </div>
           <label class="field-inline" style="width:100%;">
