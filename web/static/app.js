@@ -581,6 +581,7 @@ async function loadSymbolChart(symbol, progress) {
 let lastStrategies = [];
 let strategiesDelegateBound = false;
 const strategyExplainCache = {};  // file → {text}（会话级；服务端另有磁盘缓存兜底）
+let lastStrategiesSig = null;     // 上次渲染的策略数据签名（4s 轮询防重复重建）
 
 function ensureStrategiesDelegate() {
   if (strategiesDelegateBound) return;
@@ -647,7 +648,10 @@ function renderStrategies(rows) {
   lastStrategies = rows;
   const tbody = $("strategiesBody");
   if (!rows.length) {
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="6">暂无已保存策略</td></tr>';
+    if (lastStrategiesSig !== "[]") {
+      lastStrategiesSig = "[]";
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="6">暂无已保存策略</td></tr>';
+    }
     return;
   }
   // 排序：品种 → 周期 → 训练时间倒序（新在前）
@@ -656,6 +660,14 @@ function renderStrategies(rows) {
       String(a.symbol).localeCompare(String(b.symbol)) ||
       String(a.timeframe || "").localeCompare(String(b.timeframe || "")) ||
       String(b.trained_at || "").localeCompare(String(a.trained_at || ""))
+  );
+  // 4s 轮询会反复调到这里：数据没变就绝不重建 DOM，否则已展开的 AI 解读会被折叠回去
+  const sig = JSON.stringify(sorted);
+  if (sig === lastStrategiesSig) return;
+  lastStrategiesSig = sig;
+  // 数据真有变化、必须重建时，记住当前展开的解读，重建后原样恢复
+  const openFiles = new Set(
+    [...tbody.querySelectorAll("details[data-explain-file][open]")].map((d) => d.dataset.explainFile)
   );
   let html = "";
   let i = 0;
@@ -685,7 +697,7 @@ function renderStrategies(rows) {
         <td>${stepCell}</td>
         <td>${formatScore(r.best_score)}</td>
         <td>
-          <details class="st-explain" data-explain-file="${escHtml(r.file)}">
+          <details class="st-explain" data-explain-file="${escHtml(r.file)}"${openFiles.has(r.file) ? " open" : ""}>
             <summary title="点击展开 AI 解读"><code>${escHtml(r.formula_decoded || "—")}</code></summary>
             <div class="st-explain-body">${explainBodyHtml(r.file)}</div>
           </details>
