@@ -444,12 +444,14 @@ class AutopilotEngine:
 
     # ── 辅助 ───────────────────────────────────────────────────────────
     def _place_delta_with_retry(
-        self, delta: float, attempts: int = 3, interval_s: float = 2.0
+        self, delta: float, attempts: int = 3, base_interval_s: float = 30.0
     ) -> tuple[OrderResult, str]:
         """bar 内下单重试（B3/ADR-0007）。全败返回 (失败 OrderResult, 聚合错误)。
 
         ok=True（含"delta 低于最小手"这类成功空单）直接返回；连打 3 发打的是同一扇门，
-        interval_s 留间隔才有意义（可注入 sleep_fn 供测试）。
+        指数退避 base×2^i（默认 30s→60s）——demo 的 50013 "Systems are busy" 这类
+        瞬时过载要几十秒才缓过来，2s 连打必穿透（2026-09-04 XRPUSDT 实战）；持久性
+        失败多等一分钟无风险（不下单本身就是安全方向）。可注入 sleep_fn 供测试。
         """
         last_err = ""
         for i in range(max(1, attempts)):
@@ -459,7 +461,9 @@ class AutopilotEngine:
             last_err = res.message or f"attempt {i + 1}"
             self.log(f"[autopilot] 下单失败({i + 1}/{attempts}): {last_err}")
             if i + 1 < attempts:
-                self._sleep(interval_s)
+                wait = base_interval_s * (2 ** i)
+                self.log(f"[autopilot] {wait:.0f}s 后重试")
+                self._sleep(wait)
         return res, last_err
 
     def _alert_critical(self, title: str, detail: str) -> None:

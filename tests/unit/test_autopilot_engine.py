@@ -413,6 +413,17 @@ def test_engine_order_retry_succeeds_no_halt(tmp_path):
     assert be.order_calls >= 2
 
 
+def test_engine_order_retry_backoff_intervals(tmp_path):
+    """B3：重试间隔指数退避 30s→60s——demo 50013 瞬时过载要几十秒才缓过来
+    （2026-09-04 XRPUSDT 3 连败停机实战），2s 固定间隔必穿透。"""
+    waits: list[float] = []
+    be = FailingOrderBackend()
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=5,
+                       sleep_fn=waits.append)
+    eng.run_forever()
+    assert waits == [30.0, 60.0]  # 3 连败恰好 2 次等待，间隔翻倍
+
+
 def test_engine_run_events_and_ledger_override(tmp_path):
     """ledger_file 显式指定 → 写旁路文件（D2 补算隔离）；run_start/run_end 分界事件。"""
     from autopilot.ledger import Ledger
