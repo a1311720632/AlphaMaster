@@ -477,21 +477,52 @@ def test_fresh_paper_start_not_deferred(tmp_path):
     assert not eng._defer_first_trade
 
 
-def test_restored_testnet_start_not_deferred(tmp_path):
-    """已有账本的恢复启动不受延迟闸影响——其同根 bar 天然 early-return 等下根。"""
+def test_restored_testnet_restart_also_defers(tmp_path):
+    """启动观察闸推广（2026-09-04）：有账本的 testnet 重启同样先观察一根。
+
+    场景即实战：熔断停机多时后重启，state.last_ts 落后于最新收盘 bar——
+    若不设闸，该 bar 被当"新 bar"立即按其信号大额调仓（XRPUSDT 163k 反手）。
+    锁定：首根（追上的最新收盘 bar）只观察不下单，第二根才真正调仓。
+    """
     from autopilot.state import AutopilotState, BarRecord
 
+    # last_ts 落后 FakeSource 首轮末根（1_700_000_000 + 299*3600）一根 bar
+    last = 1_700_000_000 + 298 * 3600
     st = AutopilotState(symbol="TEST", timeframe="1h", mode="testnet",
-                        peak_equity=106000.0, last_ts=1_700_000_000 + 299 * 3600,
+                        peak_equity=106000.0, last_ts=last,
                         start_equity=106000.0)
-    st.record(BarRecord(ts=1_700_000_000 + 299 * 3600, close=100.0, target_pos=0.5,
+    st.record(BarRecord(ts=last, close=100.0, target_pos=0.5,
                         target_notional=53000.0, actual_notional=53000.0,
                         equity=106000.0, peak_equity=106000.0, drawdown_pct=0.0))
     st.save(tmp_path / "autopilot_state.json")
 
     be = TestnetSimBackend()
-    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=1)
-    assert not eng._defer_first_trade
+    # max_bars 按 history 总长计（含预置旧记录）：旧1+观察1=2 恰好停在观察根
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=2)
+    assert eng._defer_first_trade          # 有账本重启也设闸
+    eng.run_forever()
+    assert be.order_calls == 0             # 追上的最新收盘 bar 只观察
+    assert len(eng.state.history) == 2     # 观察根照常记账（旧 1 + 新 1）
+    assert not eng._defer_first_trade      # 闸已消费，下根开始正常调仓
+
+
+def test_restored_testnet_second_bar_trades(tmp_path):
+    """启动观察闸的另一半：第二根新 bar 正常调仓（闸不吞第二根）。"""
+    from autopilot.state import AutopilotState, BarRecord
+
+    last = 1_700_000_000 + 298 * 3600
+    st = AutopilotState(symbol="TEST", timeframe="1h", mode="testnet",
+                        peak_equity=106000.0, last_ts=last,
+                        start_equity=106000.0)
+    st.record(BarRecord(ts=last, close=100.0, target_pos=0.5,
+                        target_notional=53000.0, actual_notional=53000.0,
+                        equity=106000.0, peak_equity=106000.0, drawdown_pct=0.0))
+    st.save(tmp_path / "autopilot_state.json")
+
+    be = TestnetSimBackend()
+    eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=3)  # 旧1+观察1+交易1
+    eng.run_forever()
+    assert be.order_calls >= 1             # 第二根新 bar 恢复正常调仓
 
 
 def test_classify_action():

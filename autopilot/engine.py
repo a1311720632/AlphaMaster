@@ -253,15 +253,18 @@ class AutopilotEngine:
         # 昨日日报的 UTC 日标记（B4：摘要兼心跳）。壁钟驱动，日切+5min 发送
         self._last_day = ""
 
-        # 空账本首启保护（b 决策，testnet/live）：当前这根进行中的 bar 只观察不下单，
-        # 等【下一根】收盘 bar 才允许首次调仓。防止“点完启动冷不丁吃一单”——尤其
-        # 一键清除→立刻重启的序列会把同一根 bar 当两次新 bar 各打一枪。
-        # 已有账本的恢复启动不走此闸（其 last_ts 锁定同根 bar，天然等下根）。
-        self._defer_first_trade = (
-            not self.state.history and backend.mode in ("testnet", "live")
-        )
+        # 启动首根观察闸（b 决策推广，2026-09-04）：testnet/live 一律启动后先观察
+        # 一根，等【下一根】收盘 bar 出了信号才首次调仓。覆盖两种场景：
+        # ① 空账本冷启动——防“点完启动冷不丁吃一单”；
+        # ② 停机多时后重启——state.last_ts 落后多根 bar，最新收盘 bar 会被当
+        #   “新 bar”立即按其信号大额调仓（2026-09-04 XRPUSDT 熔断重启即一笔
+        #   163k 反手实战），用户要求等当前进行中的 K 线收盘再决策。
+        # 运行中崩溃重启天然等下根（last_ts 锁定同根 bar，首 tick early-return），
+        # 此闸对它只是多观察一根，无损。paper 不设闸：模拟无风险、行为对齐回测
+        # 节奏、测试面稳定。
+        self._defer_first_trade = backend.mode in ("testnet", "live")
         if self._defer_first_trade:
-            self.log("[autopilot] 空账本首启：本根 bar 仅观察，下一根收盘后开始调仓")
+            self.log("[autopilot] 启动首根：本根 bar 仅观察，下一根收盘后开始调仓")
             self._event("boot_defer", f"mode={backend.mode} 观察一根后进场")
 
     # ── 主循环 ─────────────────────────────────────────────────────────

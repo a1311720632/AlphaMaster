@@ -3241,7 +3241,7 @@ async function stopAutopilot() {  try {
 }
 
 async function resetAutopilot() {
-  if (!confirm("一键清除：停止自动驾驶并删除热账本（持仓/成交/权益曲线回到初始）。冷账本（审计流水）与归档保留。确定？")) return;
+  if (!confirm("一键清除：停止自动驾驶并清空全部历史（持仓/成交/权益曲线/审计流水全部回到初始，旧流水在服务器归档保留）。确定？")) return;
   try {
     await fetchJSON("/api/autopilot/reset", { method: "POST" });
     apPositionSig = "";  // 清前端签名缓存，强制重渲染为空

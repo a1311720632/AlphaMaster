@@ -252,9 +252,12 @@ class AutopilotManager:
             return True
 
     def reset(self) -> dict[str, Any]:
-        """一键清除：停止子进程 + 删除 autopilot_state.json（history/trades/权益记录全清）。
+        """一键清除：停止子进程 + 删 autopilot_state.json + 归档冷账本（历史全清回初始）。
 
         下次启动 engine 新建 state：paper 权益回到起点（10000），live 重记真实余额。
+        冷账本（ledger JSONL）一并归档清零（2026-09-04）——只删 state 时，下次启动
+        新 state 三元组又指向同一 ledger 文件，旧成交/曲线全部回来，"清除"落空。
+        归档而非直删：append-only 审计语义（ADR-0007 ⑧），.cleared_* 先例已有。
         """
         from config import Config
 
@@ -284,7 +287,38 @@ class AutopilotManager:
                     deleted = True
             except (ValueError, OSError):
                 pass
-            return {"stopped": stopped, "deleted": deleted}
+            # 归档冷账本：三元组取自 web_settings（UI 最后一次启动的配置）
+            archived = self._archive_ledger(load_settings())
+            return {"stopped": stopped, "deleted": deleted, "ledger_archived": archived}
+
+    def _archive_ledger(self, settings: dict[str, Any]) -> str:
+        """按 settings 三元组归档 ledger 主文件 → {name}.cleared_{YYYYMMDD}[_n]。
+
+        symbol/mode 缺失或文件不存在 → 空串（无账可清，不算失败）。归档失败（占用
+        等）也返回空串——state 已删，账本残留无害，别阻断一键清除。
+        """
+        symbol = str(settings.get("autopilot_symbol") or "")
+        mode = str(settings.get("autopilot_mode") or "")
+        if not symbol or mode not in _MODES:
+            return ""
+        from config import Config
+
+        from autopilot.ledger import ledger_path
+
+        lp = ledger_path(symbol, mode, Config.AUTOPILOT_LEDGER_DIR or PROJECT_ROOT)
+        if not lp.is_file():
+            return ""
+        date = datetime.now(timezone.utc).strftime("%Y%m%d")
+        dst = lp.with_name(f"{lp.name}.cleared_{date}")
+        n = 2
+        while dst.exists():  # 同日多次清除：追加序号防覆盖
+            dst = lp.with_name(f"{lp.name}.cleared_{date}_{n}")
+            n += 1
+        try:
+            lp.rename(dst)
+        except OSError:
+            return ""
+        return dst.name
 
     def tail_log(self, lines: int = 200) -> list[str]:
         with self._lock:

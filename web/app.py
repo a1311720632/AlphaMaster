@@ -1629,7 +1629,7 @@ def api_autopilot_stop() -> dict[str, Any]:
 
 @app.post("/api/autopilot/reset")
 def api_autopilot_reset() -> dict[str, Any]:
-    """一键清除：停止自动驾驶 + 删 autopilot_state.json（历史/成交/权益全清，回初始）。"""
+    """一键清除：停止自动驾驶 + 删 autopilot_state.json + 归档冷账本（历史全清，回初始）。"""
     try:
         save_settings({"autopilot_intended_running": False})
     except Exception:  # noqa: BLE001
