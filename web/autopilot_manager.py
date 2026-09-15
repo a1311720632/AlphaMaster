@@ -511,7 +511,7 @@ class AutopilotManager:
         """终结态 → 'stay_down' | 'relaunch'（权威表见部署 plan + ADR-0007）。
         stay_down：用户 stop / 回撤熔断 / 执行熔断 / STOP_SIGNAL / 干净退出(exit 0)。
         relaunch：断网熔断 / 未知崩溃(code>0) / 信号死亡(code<0)。
-        执行熔断 stay_down 理由：能穿透 bar 内 3 次重试的失败基本是持久的
+        执行熔断 stay_down 理由：能穿透 bar 内 6 次重试（~7.5 分钟窗口）的失败基本是持久的
         （凭据吊销/保证金不足），重拉无意义且刷屏——资金安全的终点是人。"""
         if stopped_by_user:
             return "stay_down"

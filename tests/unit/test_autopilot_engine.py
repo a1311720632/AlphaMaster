@@ -381,16 +381,16 @@ class FailingOrderBackend(ExecutionBackend):
 
 
 def test_engine_execution_breaker_halts(tmp_path):
-    """B3：下单 3 连败 → 执行熔断 halt（不靠下根 bar 自愈），reason 前缀钉死。
+    """B3：下单 6 连败 → 执行熔断 halt（不靠下根 bar 自愈），reason 前缀钉死。
 
-    sleep_fn 注入 no-op 免真等 2s；熔断时 state 落盘、halt 前留最后一根账。
+    sleep_fn 注入 no-op 免真等；熔断时 state 落盘、halt 前留最后一根账。
     """
     be = FailingOrderBackend()
     eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=5, sleep_fn=lambda s: None)
     reason = eng.run_forever()
     assert reason.startswith("执行熔断")
     assert "simulated reject" in reason
-    assert be.order_calls == 3  # 恰好 3 连重试（bar 内），halt 后不再有下一根 bar 的第 4 次
+    assert be.order_calls == 6  # 恰好 6 连重试（bar 内），halt 后不再有下一根 bar 的第 7 次
     assert eng.state.breaker_tripped
     assert len(eng.state.history) >= 1  # halt 前留了最后一根账
 
@@ -414,14 +414,14 @@ def test_engine_order_retry_succeeds_no_halt(tmp_path):
 
 
 def test_engine_order_retry_backoff_intervals(tmp_path):
-    """B3：重试间隔指数退避 30s→60s——demo 50013 瞬时过载要几十秒才缓过来
-    （2026-09-04 XRPUSDT 3 连败停机实战），2s 固定间隔必穿透。"""
+    """B3：重试间隔指数退避 30→60→120 封顶——demo 50013 过载可持续 2 分钟以上
+    （2026-09-04/09-15 XRPUSDT 两次穿透 3 发窗口停机），30/60s 两发不够。"""
     waits: list[float] = []
     be = FailingOrderBackend()
     eng = _make_engine(tmp_path, FakeSource(_pool()), be, max_bars=5,
                        sleep_fn=waits.append)
     eng.run_forever()
-    assert waits == [30.0, 60.0]  # 3 连败恰好 2 次等待，间隔翻倍
+    assert waits == [30.0, 60.0, 120.0, 120.0, 120.0]  # 6 连败 5 次等待，120s 封顶不发散
 
 
 def test_engine_run_events_and_ledger_override(tmp_path):

@@ -412,14 +412,14 @@ class AutopilotEngine:
         if deferred_now:
             pass
         elif abs(delta) > 0 and abs(delta) >= self.min_delta:
-            # 执行熔断（B3/ADR-0007）：bar 内 3 连败即停机（不靠下根 bar 自愈——
-            # 能穿透 3 次重试的失败基本是持久的：凭据吊销/保证金不足/账户限制）
+            # 执行熔断（B3/ADR-0007）：bar 内 6 连败即停机（不靠下根 bar 自愈——
+            # 能穿透 6 次重试 ~7.5 分钟的失败基本是持久的：凭据吊销/保证金不足/账户限制）
             res, last_err = self._place_delta_with_retry(delta)
             fill_ok = res.ok
             if not res.ok:
                 self._alert_critical(
                     "执行熔断",
-                    f"下单 3 连败已停机。目标 {target_notional:+.4f} / 实际 {actual:+.4f} USDT，"
+                    f"下单 6 连败已停机。目标 {target_notional:+.4f} / 实际 {actual:+.4f} USDT，"
                     f"delta {delta:+.4f}。最近错误: {last_err}。仓位保持现状，请人工处理。",
                 )
                 self._event("breaker_execution", f"delta={delta:+.4f} err={last_err}")
@@ -447,14 +447,17 @@ class AutopilotEngine:
 
     # ── 辅助 ───────────────────────────────────────────────────────────
     def _place_delta_with_retry(
-        self, delta: float, attempts: int = 3, base_interval_s: float = 30.0
+        self, delta: float, attempts: int = 6, base_interval_s: float = 30.0,
+        max_wait_s: float = 120.0
     ) -> tuple[OrderResult, str]:
         """bar 内下单重试（B3/ADR-0007）。全败返回 (失败 OrderResult, 聚合错误)。
 
-        ok=True（含"delta 低于最小手"这类成功空单）直接返回；连打 3 发打的是同一扇门，
-        指数退避 base×2^i（默认 30s→60s）——demo 的 50013 "Systems are busy" 这类
-        瞬时过载要几十秒才缓过来，2s 连打必穿透（2026-09-04 XRPUSDT 实战）；持久性
-        失败多等一分钟无风险（不下单本身就是安全方向）。可注入 sleep_fn 供测试。
+        ok=True（含"delta 低于最小手"这类成功空单）直接返回；指数退避
+        base×2^i 封顶 max_wait_s（默认 30→60→120→120→120，窗口 ~7.5 分钟）——
+        demo 的 50013 "Systems are busy" 过载能持续 2 分钟以上（2026-09-04/09-15
+        XRPUSDT 两次穿透 3 发窗口停机），30/60s 不够；封顶 120s 避免退避发散到
+        跨 bar（H1 的 bar 窗口 60 分钟，7.5 分钟重试远在其内）。持久性失败多等
+        几分钟无风险（不下单本身就是安全方向）。可注入 sleep_fn 供测试。
         """
         last_err = ""
         for i in range(max(1, attempts)):
@@ -464,7 +467,7 @@ class AutopilotEngine:
             last_err = res.message or f"attempt {i + 1}"
             self.log(f"[autopilot] 下单失败({i + 1}/{attempts}): {last_err}")
             if i + 1 < attempts:
-                wait = base_interval_s * (2 ** i)
+                wait = min(base_interval_s * (2 ** i), max_wait_s)
                 self.log(f"[autopilot] {wait:.0f}s 后重试")
                 self._sleep(wait)
         return res, last_err
