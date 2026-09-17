@@ -475,10 +475,12 @@ class BitgetBackend(OKXBackend):
     """testnet / live 模式：Bitget via ccxt（ADR-0004「加所=新增一个后端」首次落地）。
 
     OKXBackend 的执行链路——符号归一、单向持仓+逐仓配置（容忍失败）、市价单+
-    回执回读、持仓对账——全部走 ccxt 统一接口，直接继承；仅真实交易所构造不同：
-    Bitget 模拟盘走 demo trading 服务（请求头 x-demo-trading:1），set_sandbox_mode
-    对 bitget 无效，须 enableDemoTrading(True)。凭据三件套同 OKX（key/secret/passphrase），
-    但 demo key 必须在 Bitget 模拟盘环境内单独创建，真实账户的 key 在 demo 无效。
+    回执回读、持仓对账——全部走 ccxt 统一接口，直接继承；仅真实交易所构造不同。
+    ccxt 里 bitget 的 enableDemoTrading 就是 set_sandbox_mode 的别名（都只设
+    options['sandboxMode']，私有请求带 PAPTRADING:1 头）；用前者纯属语义清晰。
+    凭据三件套同 OKX（key/secret/passphrase），但**demo key 必须在 Bitget 模拟盘
+    环境内单独创建**——实盘环境的 key 打 demo 端点报 40099 "exchange environment
+    is incorrect"，反之亦然（2026-09-17 实测）。
 
     换所动因（2026-09-17）：OKX demo 两周三停——50013 下单过载 ×2（09-04/09-15）、
     50001 服务降级后市价单挂死不成交 ×1（09-16「订单未成交: open」，594 USDT 小单
