@@ -36,13 +36,23 @@ def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def _build_backend(mode: str, symbol: str) -> object:
+def _build_backend(mode: str, symbol: str, exchange: str = "okx") -> object:
     if mode == "paper":
         return SimBackend(
             start_equity=Config.AUTOPILOT_PAPER_START_EQUITY,
             cost_rate=Config.COST_RATE,
         )
     sandbox = mode == "testnet"
+    if exchange == "bitget":
+        from autopilot.backends import BitgetBackend
+
+        return BitgetBackend(
+            symbol=symbol,
+            sandbox=sandbox,
+            api_key=Config.BITGET_API_KEY,
+            secret=Config.BITGET_SECRET_KEY,
+            passphrase=Config.BITGET_PASSPHRASE,
+        )
     return OKXBackend(
         symbol=symbol,
         sandbox=sandbox,
@@ -98,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--symbol", default=None, help="覆盖策略内品种（默认用策略文件里的）")
     p.add_argument("--timeframe", default=None, help="覆盖策略内周期（默认用策略文件里的）")
-    p.add_argument("--exchange", default=Config.AUTOPILOT_EXCHANGE, help="交易所（v1=okx）")
+    p.add_argument("--exchange", default=Config.AUTOPILOT_EXCHANGE, help="执行交易所（okx / bitget）")
     p.add_argument(
         "--max-bars",
         type=int,
@@ -144,18 +154,20 @@ def main(argv: list[str] | None = None) -> int:
         f"formula_len={len(strategy.formula)}"
     )
 
-    # 2. 行情源（备用源链 B2/ADR-0007：OKX → Bybit → Binance，全挂才断连熔断）
-    if args.exchange != "okx":
-        _log(f"[autopilot] 暂不支持交易所 {args.exchange}（v1 仅 okx）")
+    # 2. 行情源（备用源链 B2/ADR-0007：OKX → Bybit → Binance，全挂才断连熔断）。
+    #    行情与执行解耦（ADR-0004）：执行可切 bitget，行情链不变。
+    if args.exchange not in ("okx", "bitget"):
+        _log(f"[autopilot] 暂不支持交易所 {args.exchange}（支持 okx / bitget）")
         return 2
     datasource = _build_datasource()
 
     # 3. 执行后端
     try:
-        backend = _build_backend(args.mode, symbol)
+        backend = _build_backend(args.mode, symbol, exchange=args.exchange)
     except Exception as exc:  # noqa: BLE001
         _log(f"[autopilot] 后端初始化失败: {exc}")
         return 2
+    _log(f"[autopilot] 执行后端: {args.exchange}（mode={args.mode}）")
 
     # 4. 告警（B4/ADR-0007）：引擎内直调飞书；webhook 未配置时 Alerter 只 log
     from autopilot.alerts import Alerter

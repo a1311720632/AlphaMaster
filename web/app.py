@@ -1433,10 +1433,14 @@ def api_autopilot_status() -> dict[str, Any]:
     return status
 
 
-def _autopilot_preflight_checks(mode: str, symbol: str | None, timeframe: str | None) -> dict[str, Any]:
+def _autopilot_preflight_checks(
+    mode: str, symbol: str | None, timeframe: str | None,
+    exchange: str | None = None,
+) -> dict[str, Any]:
     """testnet/live 启动预检（C1/D1/ADR-0007）。单项独立 try，互不影响。
 
     返回 {"ok", "checks": [{id,label,status,detail}], "armed"}。
+    exchange 缺省用 Config.AUTOPILOT_EXCHANGE（env 驱动，UI 无切换器）。
     """
     from config import Config
 
@@ -1453,29 +1457,47 @@ def _autopilot_preflight_checks(mode: str, symbol: str | None, timeframe: str | 
     except ImportError:
         add("ccxt_installed", "ccxt 已安装", "fail", "python -m pip install ccxt")
 
-    # 2. 凭据非空
-    missing = [
-        name for name, v in (
+    # 2. 凭据非空（按执行交易所检查对应三元组）
+    ex = (exchange or Config.AUTOPILOT_EXCHANGE or "okx").strip().lower()
+    if ex == "bitget":
+        cred_pairs = (
+            ("BITGET_API_KEY", Config.BITGET_API_KEY),
+            ("BITGET_SECRET_KEY", Config.BITGET_SECRET_KEY),
+            ("BITGET_PASSPHRASE", Config.BITGET_PASSPHRASE),
+        )
+    else:
+        ex = "okx"
+        cred_pairs = (
             ("OKX_API_KEY", Config.OKX_API_KEY),
             ("OKX_SECRET_KEY", Config.OKX_SECRET_KEY),
             ("OKX_PASSPHRASE", Config.OKX_PASSPHRASE),
-        ) if not (v or "").strip()
-    ]
+        )
+    ex_label = ex.upper()
+    missing = [name for name, v in cred_pairs if not (v or "").strip()]
     if missing:
-        add("credentials", "OKX 凭据已配置", "fail", f"缺 {', '.join(missing)}（.env）")
+        add("credentials", f"{ex_label} 凭据已配置", "fail", f"缺 {', '.join(missing)}（.env）")
     else:
-        add("credentials", "OKX 凭据已配置", "pass")
+        add("credentials", f"{ex_label} 凭据已配置", "pass")
 
     # 3. 凭据有效（实测 fetch_balance；同时验证 sandbox 指向——配错会 401/1100xx）
     if not missing:
         try:
-            from autopilot.backends import OKXBackend
+            if ex == "bitget":
+                from autopilot.backends import BitgetBackend
 
-            be = OKXBackend(
-                symbol=symbol or "BTCUSDT", sandbox=(mode == "testnet"),
-                api_key=Config.OKX_API_KEY, secret=Config.OKX_SECRET_KEY,
-                passphrase=Config.OKX_PASSPHRASE,
-            )
+                be = BitgetBackend(
+                    symbol=symbol or "BTCUSDT", sandbox=(mode == "testnet"),
+                    api_key=Config.BITGET_API_KEY, secret=Config.BITGET_SECRET_KEY,
+                    passphrase=Config.BITGET_PASSPHRASE,
+                )
+            else:
+                from autopilot.backends import OKXBackend
+
+                be = OKXBackend(
+                    symbol=symbol or "BTCUSDT", sandbox=(mode == "testnet"),
+                    api_key=Config.OKX_API_KEY, secret=Config.OKX_SECRET_KEY,
+                    passphrase=Config.OKX_PASSPHRASE,
+                )
             try:
                 eq = be.fetch_equity()
                 if eq > 0:
@@ -1487,7 +1509,9 @@ def _autopilot_preflight_checks(mode: str, symbol: str | None, timeframe: str | 
                 be.close()
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
-            hint = "检查 key 与 sandbox 指向（testnet 需 demo 专用 key）" if (
+            hint = "检查 key 与 sandbox 指向（testnet 需 demo 专用 key" + (
+                "；Bitget 的 demo key 须在模拟盘环境内单独创建）" if ex == "bitget" else "）"
+            ) if (
                 "401" in msg or "1100" in msg or "AuthenticationError" in msg
             ) else msg
             add("credentials_ok", "凭据有效", "fail", hint[:200])

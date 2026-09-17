@@ -49,6 +49,12 @@ class Config:
     # true=testnet/demo，false=live（仅 testnet/live 模式生效）
     OKX_SANDBOX    = os.getenv("OKX_SANDBOX", "true").lower() == "true"
 
+    # ── Bitget（执行后端备选所；AUTOPILOT_EXCHANGE=bitget 时生效）────
+    # demo key 必须在 Bitget 模拟盘环境内创建，真实账户 key 在 demo 无效。
+    BITGET_API_KEY    = os.getenv("BITGET_API_KEY", "")
+    BITGET_SECRET_KEY = os.getenv("BITGET_SECRET_KEY", "")
+    BITGET_PASSPHRASE = os.getenv("BITGET_PASSPHRASE", "")
+
     # ── 品种与周期 ────────────────────────────────────────
     # TRADE_SYMBOLS：实际交易的品种（新账号，无 m 后缀）
     SYMBOLS   = [

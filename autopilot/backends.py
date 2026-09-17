@@ -231,8 +231,8 @@ class OKXBackend(ExecutionBackend):
 
     # ── 账户配置：单向持仓 + 逐仓保证金（容忍失败）──────────────────────
     def _configure_account(self) -> None:
-        if not _CCXT_AVAILABLE:
-            return
+        # 无 _CCXT_AVAILABLE 守卫：注入 fake exchange 的测试路径本机常无 ccxt，
+        # 守卫会连配置调用一起跳过；真实路径 _CCXT_AVAILABLE 恒真，无需守卫。
         settle = (self._market or {}).get("settle", "USDT")
         for method_name, args in (
             ("set_position_mode", (False, settle)),   # False = 单向（one-way）
@@ -402,6 +402,11 @@ class OKXBackend(ExecutionBackend):
         filled_c = abs(float(receipt.get("filled") or 0.0))
         avg = float(receipt.get("average") or receipt.get("price") or 0.0) or fallback_price
         if filled_c <= 1e-12 and status != "closed":
+            # 孤儿单防御（2026-09-16 OKX demo 实战）：open 零成交的市价单留在场上，
+            # 引擎重试会再挂新单——6 连败即 6 张单堆积，事后陆续成交则仓位超调。
+            # 返回失败前先尽力撤单；撤失败也认了（demo 撮合停摆时 cancel 同样可能
+            # 失败），残余单由 ADR-0006 的交易所对账在下根 bar 兜底。
+            self._cancel_quietly(oid)
             return OrderResult(ok=False, filled_notional=0.0,
                                message=f"订单未成交: {status or 'unknown'}")
         note = "" if status == "closed" else f" (部分成交 {status})"
@@ -412,6 +417,16 @@ class OKXBackend(ExecutionBackend):
             fee=self._fee_to_quote(receipt, avg),
             message=f"confirmed {status}{note}".strip(),
         )
+
+    def _cancel_quietly(self, order_id: object) -> None:
+        """尽力撤单：失败静默（调用方已在失败路径上，撤单只是防御性清理）。"""
+        cancel = getattr(self._ex, "cancel_order", None)
+        if not order_id or cancel is None:
+            return
+        try:
+            cancel(order_id, self._ccxt_symbol)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _read_fill_receipt(self, order_id: object) -> dict | None:
         """轮询 fetch_order 拿成交回执。无回读/回读持续失败 → None（回落估算）。
@@ -454,3 +469,44 @@ class OKXBackend(ExecutionBackend):
 
     def close(self) -> None:  # noqa: B027
         pass
+
+
+class BitgetBackend(OKXBackend):
+    """testnet / live 模式：Bitget via ccxt（ADR-0004「加所=新增一个后端」首次落地）。
+
+    OKXBackend 的执行链路——符号归一、单向持仓+逐仓配置（容忍失败）、市价单+
+    回执回读、持仓对账——全部走 ccxt 统一接口，直接继承；仅真实交易所构造不同：
+    Bitget 模拟盘走 demo trading 服务（请求头 x-demo-trading:1），set_sandbox_mode
+    对 bitget 无效，须 enableDemoTrading(True)。凭据三件套同 OKX（key/secret/passphrase），
+    但 demo key 必须在 Bitget 模拟盘环境内单独创建，真实账户的 key 在 demo 无效。
+
+    换所动因（2026-09-17）：OKX demo 两周三停——50013 下单过载 ×2（09-04/09-15）、
+    50001 服务降级后市价单挂死不成交 ×1（09-16「订单未成交: open」，594 USDT 小单
+    6 连败熔断）。重试治得了过载，治不了撮合停摆。
+    """
+
+    def __init__(
+        self,
+        symbol: str,
+        sandbox: bool,
+        api_key: str = "",
+        secret: str = "",
+        passphrase: str = "",
+        exchange: object | None = None,
+    ) -> None:
+        if exchange is None:
+            if not _CCXT_AVAILABLE:
+                raise RuntimeError(
+                    "ccxt 未安装；testnet/live 模式需要它。"
+                    "运行 python -m pip install ccxt，或使用 --mode paper。"
+                )
+            exchange = ccxt.bitget({  # type: ignore[union-attr]
+                "apiKey": api_key,
+                "secret": secret,
+                "password": passphrase,
+                "enableRateLimit": True,
+                "options": {"defaultType": "swap"},
+            })
+            if sandbox:
+                exchange.enableDemoTrading(True)  # type: ignore[union-attr]
+        super().__init__(symbol=symbol, sandbox=sandbox, exchange=exchange)

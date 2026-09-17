@@ -3191,7 +3191,7 @@ async function openApLiveConfirm(mode, symbol, timeframe) {
   const metaEl = $("apLiveConfirmMeta");
   if (metaEl) {
     metaEl.innerHTML =
-      `模式 <b>${mode === "live" ? "live · 真实资金" : "testnet · OKX 模拟盘"}</b> · ` +
+      `模式 <b>${mode === "live" ? "live · 真实资金" : "testnet · 模拟盘"}</b> · ` +
       `品种 <b>${escHtml(symbol || "(策略内)")}</b> · 周期 <b>${escHtml(timeframe || "(策略内)")}</b>`;
   }
   const brEl = $("apLiveConfirmBreaker");

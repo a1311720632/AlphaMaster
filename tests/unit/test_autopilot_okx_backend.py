@@ -229,6 +229,46 @@ def test_place_delta_rejected_reports_failure():
     assert "未成交" in res.message
 
 
+def test_place_delta_open_zero_fill_cancels_orphan(monkeypatch):
+    """孤儿单防御（2026-09-16 OKX demo 实战）：open 零成交 → 返回失败前先撤单。
+
+    撮合停摆时市价单挂 open 不成交，引擎重试会再挂新单——不撤则 6 连败后
+    场上堆 6 张单，事后陆续成交仓位超调。
+    """
+    import autopilot.backends as bk
+
+    monkeypatch.setattr(bk.time, "sleep", lambda s: None)  # 回执轮询 6×0.4s 免真等
+
+    cancels: list[tuple] = []
+
+    class StuckOpenExchange(ReceiptExchange):
+        def cancel_order(self, oid, symbol):
+            cancels.append((oid, symbol))
+            return {"id": oid}
+
+    ex = StuckOpenExchange({"status": "open", "filled": 0},
+                           last_price=100.0, contract_size=1.0, min_amount=1.0)
+    res = _backend(ex).place_delta_order("BTCUSDT", 500.0)
+    assert not res.ok and "未成交" in res.message
+    assert cancels == [("fake-1", "BTC/USDT:USDT")]  # 撤的正是挂死那张
+
+
+def test_orphan_cancel_failure_tolerated(monkeypatch):
+    """撤单本身失败（demo 连 cancel 都拒绝）→ 不抛异常，仍走干净失败路径。"""
+    import autopilot.backends as bk
+
+    monkeypatch.setattr(bk.time, "sleep", lambda s: None)
+
+    class CancelRejectsExchange(ReceiptExchange):
+        def cancel_order(self, oid, symbol):
+            raise RuntimeError("cancel rejected")
+
+    ex = CancelRejectsExchange({"status": "open", "filled": 0},
+                               last_price=100.0, contract_size=1.0, min_amount=1.0)
+    res = _backend(ex).place_delta_order("BTCUSDT", 500.0)
+    assert not res.ok and "未成交" in res.message
+
+
 def test_place_delta_partial_fill_records_part():
     """部分成交（open/超时未完结）：ok=True 只记已成交部分并注明。"""
     ex = ReceiptExchange({"status": "open", "average": 100.5, "filled": 2},
