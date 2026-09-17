@@ -274,9 +274,19 @@ class OKXBackend(ExecutionBackend):
         limits = (self._market or {}).get("limits", {}) or {}
         return float((limits.get("amount", {}) or {}).get("min") or 0.0)
 
+    def _min_cost(self) -> float:
+        """单笔最小名义（Bitget 5 USDT，limits.cost.min）。"""
+        limits = (self._market or {}).get("limits", {}) or {}
+        return float((limits.get("cost", {}) or {}).get("min") or 0.0)
+
     def _notional_to_contracts(self, delta_notional: float, price: float) -> float:
-        """名义 → 合约数（带符号，遵守精度与最小手）。"""
+        """名义 → 合约数（带符号，遵守精度、最小手与最小名义）。"""
         if price <= 0 or delta_notional == 0:
+            return 0.0
+        # 低于单笔最小名义不发（Bitget demo 实测 45110 "less than the minimum amount
+        # 5 USDT"，2026-09-17）：发了必拒、白耗重试甚至熔断。归入「delta 低于
+        # 最小手」的成功空单，残差交给下根 bar 的对账自愈（ADR-0006）。
+        if abs(delta_notional) < self._min_cost():
             return 0.0
         cs = self._contract_size()
         raw = abs(delta_notional) / (price * cs)

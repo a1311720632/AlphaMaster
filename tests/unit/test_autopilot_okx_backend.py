@@ -229,6 +229,28 @@ def test_place_delta_rejected_reports_failure():
     assert "未成交" in res.message
 
 
+class CostMinExchange(FakeExchange):
+    """limits.cost.min=5（Bitget 实际形状）。"""
+
+    def market(self, symbol):
+        m = super().market(symbol)
+        m["limits"]["cost"]["min"] = 5.0
+        return m
+
+
+def test_place_delta_below_min_cost_skipped():
+    """低于单笔最小名义（45110 防御，2026-09-17 Bitget demo 实测 5 USDT）
+    → 成功空单不发单；高于门槛照发。"""
+    ex = CostMinExchange(last_price=1.0, contract_size=1.0, min_amount=1.0)
+    be = _backend(ex)
+    res = be.place_delta_order("BTCUSDT", 4.0)   # 4 张 ≥ 最小手，但 4 < 5 USDT 名义
+    assert res.ok and res.filled_notional == 0.0
+    assert "低于最小手" in res.message
+    assert not ex.orders                          # 根本没发出去
+    res2 = be.place_delta_order("BTCUSDT", 500.0)
+    assert res2.ok and ex.orders                  # 合规尺寸照常下
+
+
 def test_place_delta_open_zero_fill_cancels_orphan(monkeypatch):
     """孤儿单防御（2026-09-16 OKX demo 实战）：open 零成交 → 返回失败前先撤单。
 
