@@ -509,4 +509,7 @@ class BitgetBackend(OKXBackend):
             })
             if sandbox:
                 exchange.enableDemoTrading(True)  # type: ignore[union-attr]
+            # 父类仅在自己的构造分支 load_markets，注入路径没有——真实 bitget
+            # 实例必须在此加载，否则 market() 抛 "markets not loaded"。
+            exchange.load_markets()  # type: ignore[union-attr]
         super().__init__(symbol=symbol, sandbox=sandbox, exchange=exchange)

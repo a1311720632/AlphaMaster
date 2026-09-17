@@ -22,11 +22,16 @@ class FakeBitgetExchange:
     def __init__(self, config=None):
         self.config = dict(config or {})
         self.demo_calls: list[bool] = []
+        self.load_markets_calls = 0
         self.config_calls: list[tuple] = []
         FakeBitgetExchange.last_instance = self
 
     def enableDemoTrading(self, flag=True):
         self.demo_calls.append(bool(flag))
+
+    def load_markets(self, reload=False):
+        self.load_markets_calls += 1
+        return {}
 
     def market(self, symbol):
         return {
@@ -76,6 +81,7 @@ def test_bitget_demo_construction_shape(monkeypatch):
     assert isinstance(ex, FakeBitgetExchange)
     assert be._ex is ex
     assert ex.demo_calls == [True]                      # demo trading 服务，非 set_sandbox_mode
+    assert ex.load_markets_calls == 1                   # 注入父类前已加载（否则 market() 抛错）
     assert ex.config["apiKey"] == "k1"
     assert ex.config["secret"] == "s1"
     assert ex.config["password"] == "p1"               # ccxt 的 passphrase 键名是 password
