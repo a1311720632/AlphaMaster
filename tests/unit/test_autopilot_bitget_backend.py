@@ -24,6 +24,7 @@ class FakeBitgetExchange:
         self.demo_calls: list[bool] = []
         self.load_markets_calls = 0
         self.config_calls: list[tuple] = []
+        self._upnl = 0.0
         FakeBitgetExchange.last_instance = self
 
     def enableDemoTrading(self, flag=True):
@@ -67,6 +68,12 @@ class FakeBitgetExchange:
 
     def fetch_balance(self):
         return {"USDT": {"total": 5000.0, "free": 5000.0, "used": 0.0}}
+
+    def fetch_positions(self, symbols=None):
+        if self._upnl:
+            return [{"symbol": "XRP/USDT:USDT", "contracts": 100, "side": "long",
+                     "unrealizedPnl": self._upnl}]
+        return []
 
 
 def _patch_ccxt(monkeypatch, cls=FakeBitgetExchange):
@@ -121,4 +128,30 @@ def test_bitget_inherits_execution_path(monkeypatch):
     assert res.ok and "confirmed" in res.message
     assert res.filled_notional == pytest.approx(100.0)  # 50 × 2.0 × 1
     assert res.price == pytest.approx(2.0)
+    assert be.fetch_equity() == pytest.approx(5000.0)  # 无持仓 → 纯余额
+
+
+def test_bitget_fetch_equity_adds_unrealized_pnl(monkeypatch):
+    """Bitget 余额不含未实现盈亏（OKX 含）→ 权益 = 余额 + ΣuPnL。
+
+    2026-09-18 实战 bug：多单浮盈 +433 完全隐身，面板收益算成 -1.1%。
+    """
+    _patch_ccxt(monkeypatch)
+    ex = FakeBitgetExchange()
+    ex._upnl = 131.5
+    be = BitgetBackend("XRPUSDT", sandbox=True, exchange=ex)
+    assert be.fetch_equity() == pytest.approx(5131.5)
+
+
+def test_bitget_fetch_equity_degrades_to_balance(monkeypatch, capsys):
+    """读持仓失败 → 退化为纯余额并留痕，不抛。"""
+    _patch_ccxt(monkeypatch)
+    ex = FakeBitgetExchange()
+
+    def boom():
+        raise RuntimeError("pos read down")
+
+    ex.fetch_positions = boom
+    be = BitgetBackend("XRPUSDT", sandbox=True, exchange=ex)
     assert be.fetch_equity() == pytest.approx(5000.0)
+    assert "退化为纯余额" in capsys.readouterr().out

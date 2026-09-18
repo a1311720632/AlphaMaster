@@ -539,3 +539,28 @@ class BitgetBackend(OKXBackend):
             # 实例必须在此加载，否则 market() 抛 "markets not loaded"。
             exchange.load_markets()  # type: ignore[union-attr]
         super().__init__(symbol=symbol, sandbox=sandbox, exchange=exchange, leverage=leverage)
+
+    def fetch_equity(self) -> float:
+        """USDT 权益 = 账户余额 + 全仓位未实现盈亏。
+
+        Bitget 的 fetch_balance USDT total **不含未实现盈亏**（OKX 含，
+        OKXBackend 原假设照搬过来就错）——只读余额会让持仓浮盈完全隐身：
+        权益曲线走平、面板实时收益算成负、仓位按缩水的权益 sizing
+        （2026-09-18 实战：多单浮盈 +433，面板却显示 -1.1%）。
+        注：不走 mix/account/accounts 的 accountEquity——该端点需要
+        额外的 future-pos-read 权限，实测这把 demo key 没有；而
+        fetch_positions 是通的（引擎对账一直在用）。
+        """
+        bal = self._ex.fetch_balance()  # type: ignore[union-attr]
+        usdt = (bal or {}).get("USDT", {}) or {}
+        total = usdt.get("total")
+        if total is None:
+            total = (usdt.get("free") or 0.0) + (usdt.get("used") or 0.0)
+        total = float(total or 0.0)
+        try:
+            for p in self._ex.fetch_positions() or []:  # type: ignore[union-attr]
+                total += float(p.get("unrealizedPnl") or p.get("unrealisedPnl") or 0.0)
+        except Exception as exc:  # noqa: BLE001 - 退化纯余额，位置盈亏下根 bar 兜底
+            print(f"[autopilot] fetch_equity 读持仓盈亏失败（退化为纯余额）: {exc}",
+                  flush=True)
+        return total
