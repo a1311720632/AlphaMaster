@@ -1489,6 +1489,7 @@ def _autopilot_preflight_checks(
                     symbol=symbol or "BTCUSDT", sandbox=(mode == "testnet"),
                     api_key=Config.BITGET_API_KEY, secret=Config.BITGET_SECRET_KEY,
                     passphrase=Config.BITGET_PASSPHRASE,
+                    leverage=Config.AUTOPILOT_LEVERAGE,
                 )
             else:
                 from autopilot.backends import OKXBackend
@@ -1497,6 +1498,7 @@ def _autopilot_preflight_checks(
                     symbol=symbol or "BTCUSDT", sandbox=(mode == "testnet"),
                     api_key=Config.OKX_API_KEY, secret=Config.OKX_SECRET_KEY,
                     passphrase=Config.OKX_PASSPHRASE,
+                    leverage=Config.AUTOPILOT_LEVERAGE,
                 )
             try:
                 eq = be.fetch_equity()

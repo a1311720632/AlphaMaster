@@ -53,6 +53,9 @@ class FakeExchange:
     def set_margin_mode(self, margin_type, settle=None):
         self.config_calls.append(("set_margin_mode", margin_type, settle))
 
+    def set_leverage(self, leverage, symbol=None):
+        self.config_calls.append(("set_leverage", leverage, symbol))
+
     def fetch_balance(self):
         return {"USDT": {"total": self._equity, "free": self._equity, "used": 0.0}}
 
@@ -148,12 +151,27 @@ def test_flatten_all_uses_reduceonly_opposite_side():
     assert (ex.orders[0]["params"] or {}).get("reduceOnly") is True
 
 
-def test_configure_account_attempts_one_way_isolated():
+def test_configure_account_sets_one_way_and_leverage(capsys):
+    """账户配置：单向持仓 + 名义杠杆（统一签名），失败容忍但留痕。
+
+    25203 实战（2026-09-18）：Bitget 按订单名义校验保证金，1x 杠杆下
+    反手单 |old|+|new| ≈ 2×权益 必拒——杠杆默认 3x。margin_mode 不再
+    强设（cross/isolated 交账户侧预设）。
+    """
     ex = FakeExchange()
     _backend(ex)
-    methods = {c[0] for c in ex.config_calls}
-    assert "set_position_mode" in methods
-    assert "set_margin_mode" in methods
+    calls = {c[0]: c[1:] for c in ex.config_calls}
+    assert calls["set_position_mode"] == (False, None)       # 单向持仓
+    assert calls["set_leverage"] == (3, "BTC/USDT:USDT")     # 真实 ccxt symbol
+    assert "set_margin_mode" not in calls                    # 不再强设
+
+    # 配置失败：不抛异常，但日志留痕（静默吞错曾让 25236/25203 盲查两晚）
+    class RejectLeverage(FakeExchange):
+        def set_leverage(self, leverage, symbol=None):
+            raise RuntimeError("leverage rejected")
+
+    _backend(RejectLeverage())  # 不抛
+    assert "账户配置" in capsys.readouterr().out
 
 
 def test_fetch_position_detail_returns_triple():

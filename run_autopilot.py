@@ -52,6 +52,7 @@ def _build_backend(mode: str, symbol: str, exchange: str = "okx") -> object:
             api_key=Config.BITGET_API_KEY,
             secret=Config.BITGET_SECRET_KEY,
             passphrase=Config.BITGET_PASSPHRASE,
+            leverage=Config.AUTOPILOT_LEVERAGE,
         )
     return OKXBackend(
         symbol=symbol,
@@ -59,6 +60,7 @@ def _build_backend(mode: str, symbol: str, exchange: str = "okx") -> object:
         api_key=Config.OKX_API_KEY,
         secret=Config.OKX_SECRET_KEY,
         passphrase=Config.OKX_PASSPHRASE,
+        leverage=Config.AUTOPILOT_LEVERAGE,
     )
 
 

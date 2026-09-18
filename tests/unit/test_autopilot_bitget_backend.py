@@ -50,6 +50,9 @@ class FakeBitgetExchange:
     def set_margin_mode(self, margin_type, settle=None):
         self.config_calls.append(("set_margin_mode", margin_type, settle))
 
+    def set_leverage(self, leverage, symbol=None):
+        self.config_calls.append(("set_leverage", leverage, symbol))
+
     def fetch_ticker(self, symbol):
         return {"last": 2.0, "ask": 2.0, "bid": 2.0}
 
@@ -88,9 +91,10 @@ def test_bitget_demo_construction_shape(monkeypatch):
     assert ex.config["options"]["defaultType"] == "swap"
     assert be.mode == "testnet"
     assert be._ccxt_symbol == "XRP/USDT:USDT"
-    # 单向持仓 + 逐仓配置照走（ccxt 统一接口，继承自 OKXBackend）
-    kinds = [c[0] for c in ex.config_calls]
-    assert "set_position_mode" in kinds and "set_margin_mode" in kinds
+    # 单向持仓 + 杠杆配置照走（ccxt 统一接口，继承自 OKXBackend）
+    kinds = {c[0]: c[1:] for c in ex.config_calls}
+    assert kinds.get("set_position_mode") == (False, None)
+    assert kinds.get("set_leverage") == (3, "XRP/USDT:USDT")
 
 
 def test_bitget_live_skips_demo_flag(monkeypatch):

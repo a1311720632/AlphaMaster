@@ -201,11 +201,13 @@ class OKXBackend(ExecutionBackend):
         secret: str = "",
         passphrase: str = "",
         exchange: object | None = None,
+        leverage: float = 3.0,
     ) -> None:
         self._ccxt_symbol = self._to_ccxt_symbol(symbol)
         self._raw_symbol = symbol
         self._sandbox = sandbox
         self.mode = "testnet" if sandbox else "live"
+        self.leverage = float(leverage)
 
         if exchange is not None:
             self._ex = exchange  # 测试注入
@@ -229,22 +231,33 @@ class OKXBackend(ExecutionBackend):
         self._market = self._ex.market(self._ccxt_symbol)  # type: ignore[union-attr]
         self._configure_account()
 
-    # ── 账户配置：单向持仓 + 逐仓保证金（容忍失败）──────────────────────
+    # ── 账户配置：单向持仓 + 名义杠杆（容忍失败但留痕）──────────────────
     def _configure_account(self) -> None:
-        # 无 _CCXT_AVAILABLE 守卫：注入 fake exchange 的测试路径本机常无 ccxt，
-        # 守卫会连配置调用一起跳过；真实路径 _CCXT_AVAILABLE 恒真，无需守卫。
-        settle = (self._market or {}).get("settle", "USDT")
+        """单向持仓 + 杠杆（构造参数 leverage，默认 3x，入口从 Config 接线）。
+
+        统一签名按 ccxt 规范传参（旧版把 settle 当 symbol 传是错的）。
+        杠杆的账：策略仓位 |tanh|<1 恒 ≤1x 名义，杠杆只是保证金分配旋钮——
+        但 Bitget 按订单名义（而非结果仓位）校验保证金，1x 下反手单
+        |old|+|new| ≈ 2×权益 > 可用，必拒 25203（2026-09-18 实战：-7.3k
+        翻 +8.2k 连败 6 次熔断）；3x 下需 |delta|/3，留足余量。强平经济
+        学不变：3x 于 -33% 逆向波动强平，损失额与 1x 持有同波动一致，
+        仅牺牲穿越深针刺的存活率（demo/testnet 阶段可接受）。
+        margin_mode 不强设：cross/isolated 交由账户侧预设（两所默认不同，
+        Bitget demo 实测 cross+3x 反手通畅）。
+        失败容忍但 print 留痕——静默吞错曾让 25236/25203 盲查两晚。
+        """
         for method_name, args in (
-            ("set_position_mode", (False, settle)),   # False = 单向（one-way）
-            ("set_margin_mode", ("isolated", settle)),
+            ("set_position_mode", (False,)),                     # 单向（one-way）
+            ("set_leverage", (self.leverage, self._ccxt_symbol)),
         ):
             method = getattr(self._ex, method_name, None)
             if method is None:
                 continue
             try:
                 method(*args)
-            except Exception:  # noqa: BLE001 - 账户可能已预设；失败不阻断
-                pass
+            except Exception as exc:  # noqa: BLE001 - 账户可能已预设；失败不阻断
+                print(f"[autopilot] 账户配置 {method_name}{args} 失败（容忍）: {exc}",
+                      flush=True)
 
     @staticmethod
     def _to_ccxt_symbol(symbol: str) -> str:
@@ -505,6 +518,7 @@ class BitgetBackend(OKXBackend):
         secret: str = "",
         passphrase: str = "",
         exchange: object | None = None,
+        leverage: float = 3.0,
     ) -> None:
         if exchange is None:
             if not _CCXT_AVAILABLE:
@@ -524,4 +538,4 @@ class BitgetBackend(OKXBackend):
             # 父类仅在自己的构造分支 load_markets，注入路径没有——真实 bitget
             # 实例必须在此加载，否则 market() 抛 "markets not loaded"。
             exchange.load_markets()  # type: ignore[union-attr]
-        super().__init__(symbol=symbol, sandbox=sandbox, exchange=exchange)
+        super().__init__(symbol=symbol, sandbox=sandbox, exchange=exchange, leverage=leverage)

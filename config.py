@@ -220,6 +220,9 @@ class Config:
     #       / live（真实资金）。三模式共享同一信号核心，仅执行后端不同。
     AUTOPILOT_MODE            = os.getenv("AUTOPILOT_MODE", "paper")
     AUTOPILOT_EXCHANGE        = os.getenv("AUTOPILOT_EXCHANGE", "okx")
+    # 名义杠杆（保证金分配旋钮，非风险放大器——策略仓位恒 ≤1x 名义）。
+    # Bitset 按订单名义校验保证金，1x 下反手单必拒 25203（2026-09-18 实战）。
+    AUTOPILOT_LEVERAGE        = float(os.getenv("AUTOPILOT_LEVERAGE", "3"))
     # 喂特征引擎的历史 bar 数（OKXSource 单次请求上限 300；足以预热最长特征 lookback）
     AUTOPILOT_LOOKBACK_BARS   = 300
     AUTOPILOT_PAPER_START_EQUITY = 10000.0   # paper 模式模拟权益起点（USDT）
