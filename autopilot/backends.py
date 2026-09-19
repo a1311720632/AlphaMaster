@@ -391,6 +391,18 @@ class OKXBackend(ExecutionBackend):
         与旧行为一致；持仓真值仍由 ADR-0006 对账兜底，估算只影响审计精度不影响仓位。
         """
         direction = 1.0 if side == "buy" else -1.0
+
+        def _reject(exc: Exception) -> OrderResult:
+            # 交易所判定低于最小下单量（45110）→ 成功空单而非失败：本地 cost 门槛
+            # 与交易所口径必有出入（精度截断、按 mark 价评估、边界随价格漂移——
+            # 2026-09-19 实战：5.36 USDT delta 过了本地 5 USDT 门槛仍被拒，六连败
+            # 熔断停机）。交易所的判定才是权威，这类拒绝重试无意义，让下根 bar
+            # 对账自愈（ADR-0006）。
+            msg = str(exc)
+            if "45110" in msg or "less than the minimum amount" in msg:
+                return OrderResult(ok=True, filled_notional=0.0,
+                                   message="低于交易所最小下单量，跳过（下根 bar 对账）")
+            return OrderResult(ok=False, filled_notional=0.0, message=f"下单失败: {exc}")
         # 注意：不可给 ccxt 传 params=None——部分版本会迭代 params 报
         # "'NoneType' object is not iterable"。无附加参数时走默认参调用。
         try:
@@ -405,13 +417,13 @@ class OKXBackend(ExecutionBackend):
                 )
         except Exception as exc:  # noqa: BLE001 - reduceOnly 不被支持时退化为普通市价
             if not reduce_only:
-                return OrderResult(ok=False, filled_notional=0.0, message=f"下单失败: {exc}")
+                return _reject(exc)
             try:
                 res = self._ex.create_order(  # type: ignore[union-attr]
                     self._ccxt_symbol, "market", side, abs(contracts)
                 )
             except Exception as exc2:  # noqa: BLE001
-                return OrderResult(ok=False, filled_notional=0.0, message=f"下单失败: {exc2}")
+                return _reject(exc2)
         cs = self._contract_size()
         oid = res.get("id") if isinstance(res, dict) else None
         receipt = self._read_fill_receipt(oid)

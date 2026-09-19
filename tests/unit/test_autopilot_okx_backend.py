@@ -269,6 +269,29 @@ def test_place_delta_below_min_cost_skipped():
     assert res2.ok and ex.orders                  # 合规尺寸照常下
 
 
+def test_exchange_below_min_rejection_is_noop():
+    """交易所判 45110（本地门槛漏网：精度截断/mark 价口径/边界随价漂移）
+    → 成功空单，不熔断（2026-09-19 实战：5.36 USDT 六连败停机）。"""
+    class MinRejectExchange(CostMinExchange):
+        def create_order(self, symbol, type_, side, amount, price=None, params=None):
+            raise RuntimeError(
+                'bitget {"code":"45110","msg":"less than the minimum amount 5 USDT"}')
+
+    be = _backend(MinRejectExchange(last_price=1.3, contract_size=1.0, min_amount=1.0))
+    res = be.place_delta_order("BTCUSDT", 5.36)  # 过本地 5 USDT 门槛，仍被交易所拒
+    assert res.ok and res.filled_notional == 0.0
+    assert "最小下单量" in res.message
+
+    # 其他错误照旧 ok=False（走执行熔断计数）
+    class OtherRejectExchange(CostMinExchange):
+        def create_order(self, symbol, type_, side, amount, price=None, params=None):
+            raise RuntimeError('bitget {"code":"41116","msg":"other error"}')
+
+    res2 = _backend(OtherRejectExchange(last_price=1.3, contract_size=1.0,
+                                        min_amount=1.0)).place_delta_order("BTCUSDT", 500.0)
+    assert not res2.ok and "下单失败" in res2.message
+
+
 def test_place_delta_open_zero_fill_cancels_orphan(monkeypatch):
     """孤儿单防御（2026-09-16 OKX demo 实战）：open 零成交 → 返回失败前先撤单。
 
